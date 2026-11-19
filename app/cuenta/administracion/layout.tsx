@@ -11,6 +11,7 @@ async function AdminShellGate({ children }: { children: ReactNode }) {
       initialLocationName={registration.location.name}
       initialStaffName={registration.staff.displayName}
       initialRoles={registration.staff.roles as StaffRole[]}
+      initialServiceMode={registration.location.serviceMode}
     >
       {children}
     </AdminShell>

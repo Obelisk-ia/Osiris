@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  isRoleSelectionChecked, roleSelections, toggleRoleSelection, type OperationalRole,
+  isRoleSelectionChecked, roleSelections, serviceModes, toggleRoleSelection, type OperationalRole, type ServiceMode,
 } from "@/lib/restaurant-roles";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -12,6 +12,7 @@ export type RegistrationDetails = {
   kind: "owner" | "staff";
   displayName: string;
   restaurantName: string;
+  serviceMode: ServiceMode;
   code: string;
   roles: OperationalRole[];
 };
@@ -21,7 +22,7 @@ export function RegistrationFields({ value, onChange, disabled }: {
   onChange: (value: RegistrationDetails) => void;
   disabled: boolean;
 }) {
-  const { kind, displayName, restaurantName, code, roles } = value;
+  const { kind, displayName, restaurantName, serviceMode, code, roles } = value;
   return (
     <>
       <fieldset disabled={disabled}>
@@ -42,11 +43,20 @@ export function RegistrationFields({ value, onChange, disabled }: {
         <Input id="display-name" name="name" autoComplete="name" value={displayName} onChange={(event) => onChange({ ...value, displayName: event.target.value })} placeholder="Nombre y apellido" maxLength={100} required disabled={disabled} />
       </div>
       {kind === "owner" ? (
-        <div className="auth-field">
-          <Label htmlFor="restaurant-name">Nombre del restaurante</Label>
-          <Input id="restaurant-name" name="organization" autoComplete="organization" value={restaurantName} onChange={(event) => onChange({ ...value, restaurantName: event.target.value })} placeholder="Como lo conocen tus clientes" maxLength={100} required disabled={disabled} />
-          <p className="small-note">Generaremos un código para que tu equipo pueda registrarse. Podrás copiarlo desde tu cuenta.</p>
-        </div>
+        <>
+          <div className="auth-field">
+            <Label htmlFor="restaurant-name">Nombre del restaurante</Label>
+            <Input id="restaurant-name" name="organization" autoComplete="organization" value={restaurantName} onChange={(event) => onChange({ ...value, restaurantName: event.target.value })} placeholder="Como lo conocen tus clientes" maxLength={100} required disabled={disabled} />
+            <p className="small-note">Generaremos un código para que tu equipo pueda registrarse. Podrás copiarlo desde tu cuenta.</p>
+          </div>
+          <div className="auth-field">
+            <Label htmlFor="registration-service-mode">Modalidad de servicio</Label>
+            <select id="registration-service-mode" className="az-select min-h-11" value={serviceMode} disabled={disabled}
+              onChange={(event) => onChange({ ...value, serviceMode: event.target.value as ServiceMode })}>
+              {serviceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
+            </select>
+          </div>
+        </>
       ) : (
         <>
           <div className="auth-field">

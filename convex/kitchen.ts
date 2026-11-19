@@ -1,6 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import { listReplenishments, replenishmentView } from "./buffet";
 import { requireStaff, safeInteger } from "./model/access";
 import { consumeRecipe } from "./model/inventory";
 import { emitNotification } from "./model/notifications";
@@ -18,6 +19,8 @@ import {
 import { preparationArea, preparationStatus, staffRole } from "./model/validators";
 import {
   areasForStaffRoles,
+  locationPreparationAreas,
+  PREPARATION_AREAS,
   PREPARATION_AREA_META,
   type PreparationArea,
   type StaffRole,
@@ -231,10 +234,11 @@ export const snapshot = query({
     autoLateOrderEnabled: v.boolean(),
     autoLateOrderMinutes: v.number(),
     tickets: v.array(ticketValidator),
+    replenishments: v.array(replenishmentView),
   }),
   handler: async (ctx) => {
     const staff = await requireStaff(ctx, undefined, undefined, KITCHEN_ACCESS_ROLES);
-    const [restaurant, location, orderedPreps, preparingPreps, readyPreps, cancelledPreps] =
+    const [restaurant, location, orderedPreps, preparingPreps, readyPreps, cancelledPreps, buffetBatches] =
       await Promise.all([
         ctx.db.get("organizations", staff.organizationId),
         ctx.db.get("locations", staff.locationId),
@@ -263,16 +267,12 @@ export const snapshot = query({
           )
           .order("desc")
           .take(60),
+        listReplenishments(ctx, staff.locationId, true),
       ]);
 
-    const isAdmin = staff.roles.includes("owner") || staff.roles.includes("manager");
     const roleAreas = areasForStaffRoles(staff.roles as readonly StaffRole[]);
-    const enabledAreas: PreparationArea[] = isAdmin
-      ? ((location?.enabledPreparationAreas && location.enabledPreparationAreas.length > 0
-          ? location.enabledPreparationAreas
-          : roleAreas) as PreparationArea[])
-      : roleAreas;
-    const allowedAreaSet = new Set<PreparationArea>(enabledAreas);
+    const enabledAreas = locationPreparationAreas(location?.enabledPreparationAreas);
+    const allowedAreaSet = new Set(roleAreas);
 
     const unackedCancelled = cancelledPreps.filter((p) => p.cancelAcknowledgedAt === undefined);
     const allPreps = [...orderedPreps, ...preparingPreps, ...readyPreps, ...unackedCancelled];
@@ -543,11 +543,13 @@ export const snapshot = query({
       .filter((t) => t.hasPending || t.hasInProgress || t.hasReadyUndelivered || t.hasUnackedCancelled)
       .sort((a, b) => a.createdAt - b.createdAt);
 
-    const chipAreaSet = new Set<PreparationArea>(enabledAreas);
-    if (isAdmin) {
-      for (const t of tickets) chipAreaSet.add(t.area);
-    }
-    const allowedAreas = (["kitchen", "bar", "cocktails", "coffee"] as const)
+    const replenishments = buffetBatches.filter((batch) => roleAreas.includes(batch.area))
+      .sort((a, b) => a.requestedAt - b.requestedAt);
+    // Keep already-routed work visible until the station finishes it.
+    const chipAreaSet = new Set(enabledAreas.filter((area) => allowedAreaSet.has(area)));
+    for (const t of tickets) chipAreaSet.add(t.area);
+    for (const batch of replenishments) chipAreaSet.add(batch.area);
+    const allowedAreas = PREPARATION_AREAS
       .filter((area) => chipAreaSet.has(area))
       .map((area) => ({ area, name: PREPARATION_AREA_META[area].name }));
 
@@ -560,6 +562,7 @@ export const snapshot = query({
       autoLateOrderEnabled: location?.autoLateOrderEnabled ?? true,
       autoLateOrderMinutes: location?.autoLateOrderMinutes ?? 20,
       tickets,
+      replenishments,
     };
   },
 });

@@ -20,7 +20,7 @@ import { flushSync } from "react-dom";
 import { api } from "@/convex/_generated/api";
 import { AdminModal } from "@/components/restaurant/admin/admin-ui";
 import { NotificationsBell, useNotificationsState } from "@/components/restaurant/notifications-bell";
-import { formatRoles, type StaffRole } from "@/lib/restaurant-roles";
+import { formatRoles, usesAssignedTables, type ServiceMode, type StaffRole } from "@/lib/restaurant-roles";
 import { formatShortDate, initials, toRoman } from "@/lib/format";
 
 export function WaiterShell({
@@ -28,12 +28,16 @@ export function WaiterShell({
   initialLocationName,
   initialStaffName,
   initialRoles,
+  initialServiceMode,
+  initialBuffetTableService,
   children,
 }: {
   initialRestaurantName: string;
   initialLocationName: string;
   initialStaffName: string;
   initialRoles: readonly StaffRole[];
+  initialServiceMode: ServiceMode;
+  initialBuffetTableService?: boolean;
   children: ReactNode;
 }) {
   const pathname = usePathname();
@@ -54,6 +58,9 @@ export function WaiterShell({
   const canQuery = isAuthenticated && !signingOut;
 
   const live = useQuery(api.restaurants.current, canQuery ? {} : "skip");
+  const serviceMode = live?.location.serviceMode ?? initialServiceMode;
+  const hasOpenReplenishments = useQuery(api.buffet.hasOpenReplenishments,
+    canQuery && serviceMode === "a_la_carte" ? {} : "skip");
   const tablesSnap = useQuery(api.waiter.tablesSnapshot, canQuery ? {} : "skip");
   const { unreadCount } = useNotificationsState(canQuery);
 
@@ -84,9 +91,14 @@ export function WaiterShell({
   }, [accountMenuOpen]);
 
   const isTakeout = pathname.startsWith("/cuenta/mesero/llevar");
+  const isBuffet = pathname === "/cuenta/buffet";
+  const buffetFirst = serviceMode === "buffet";
+  const showBuffet = serviceMode !== "a_la_carte" || hasOpenReplenishments;
+  const showTables = usesAssignedTables(live?.location ?? { serviceMode, buffetTableService: initialBuffetTableService }) ||
+    Boolean(tablesSnap?.busyTables.length);
   const isOrderDetail =
     pathname.startsWith("/cuenta/mesero/mesa/") || pathname.startsWith("/cuenta/mesero/cuenta/");
-  const isTables = !isTakeout;
+  const isTables = !isTakeout && !isBuffet;
 
   const hasKitchen = roles.some(
     (r) => r === "chef" || r === "bar" || r === "bartender" || r === "barista",
@@ -174,17 +186,21 @@ export function WaiterShell({
     </div>
   );
 
+  const buffetItems = showBuffet ? [{ id: "buffet", label: "Buffet", href: "/cuenta/buffet", active: isBuffet, badge: 0, icon: UtensilsCrossed }] : [];
   const navItems = [
-    { id: "mesas", label: "Mesas", href: "/cuenta/mesas", active: isTables, badge: readyCount },
-    { id: "llevar", label: "Para llevar", href: "/cuenta/mesero/llevar", active: isTakeout, badge: 0 },
+    ...(buffetFirst ? buffetItems : []),
+    ...(showTables ? [{ id: "mesas", label: "Mesas", href: "/cuenta/mesas", active: isTables, badge: readyCount, icon: Grid2x2 }] : []),
+    ...(!buffetFirst ? buffetItems : []),
+    { id: "llevar", label: "Para llevar", href: "/cuenta/mesero/llevar", active: isTakeout, badge: 0, icon: ShoppingBag },
   ];
 
-  const pageTitle = isTakeout ? "Para llevar" : isOrderDetail ? "Orden y cuenta" : "Mis mesas";
+  const pageTitle = isBuffet ? "Buffet" : isTakeout ? "Para llevar" : isOrderDetail
+    ? (buffetFirst ? "Cuenta" : "Orden y cuenta") : "Mis mesas";
 
   return (
     <div className="az-shell">
       <aside className="az-side" aria-label="Navegación de mesero">
-        <Link className="brand" href="/cuenta/mesas">
+        <Link className="brand" href={buffetFirst ? "/cuenta/buffet" : "/cuenta/mesas"}>
           <span className="brand-mark" aria-hidden="true">Ø</span>
           <strong>Osiris</strong>
         </Link>
@@ -234,9 +250,9 @@ export function WaiterShell({
       <header className="az-top">
         {isOrderDetail && (
           <Link
-            href="/cuenta/mesas"
+            href={showTables ? "/cuenta/mesas" : "/cuenta/buffet"}
             className="inline-flex size-9 items-center justify-center rounded-full hover:bg-black/5"
-            aria-label="Volver a mis mesas"
+            aria-label={showTables ? "Volver a mis mesas" : "Volver al buffet"}
           >
             <ArrowLeft className="size-5" aria-hidden="true" />
           </Link>
@@ -286,22 +302,12 @@ export function WaiterShell({
       </main>
 
       <nav className="az-bottom-nav" aria-label="Navegación principal móvil">
-        <Link
-          href="/cuenta/mesas"
-          className="az-nav-btn"
-          aria-current={isTables ? "page" : undefined}
-        >
-          <Grid2x2 aria-hidden="true" />
-          <span>Mesas</span>
-        </Link>
-        <Link
-          href="/cuenta/mesero/llevar"
-          className="az-nav-btn"
-          aria-current={isTakeout ? "page" : undefined}
-        >
-          <ShoppingBag aria-hidden="true" />
-          <span>Para llevar</span>
-        </Link>
+        {navItems.map(({ id, icon: Icon, href, label, active }) => (
+          <Link key={id} href={href} className="az-nav-btn" aria-current={active ? "page" : undefined}>
+            <Icon aria-hidden="true" />
+            <span>{label}</span>
+          </Link>
+        ))}
         <button
           type="button"
           className="az-nav-btn"

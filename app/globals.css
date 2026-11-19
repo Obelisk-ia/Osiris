@@ -761,7 +761,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 18px 20px 14px;
-  border-bottom: 1px solid var(--az-border-soft);
+  border-bottom: 1px solid var(--az-border-soft, var(--border));
 }
 .az-modal-head h2 {
   font-family: var(--font-inter-tight), sans-serif;
@@ -782,7 +782,7 @@
   justify-content: flex-end;
   gap: 10px;
   padding: 14px 20px;
-  border-top: 1px solid var(--az-border-soft);
+  border-top: 1px solid var(--az-border-soft, var(--border));
 }
 .az-form-grid {
   display: grid;

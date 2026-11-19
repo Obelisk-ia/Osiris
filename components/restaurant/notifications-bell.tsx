@@ -15,11 +15,12 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { AdminModal, EmptyState } from "@/components/restaurant/admin/admin-ui";
 import { Button } from "@/components/ui/button";
-import { formatDateTime } from "@/lib/format";
+import { errorMessage, formatDateTime } from "@/lib/format";
 
 const KIND_ICON = {
   ready: Check,
@@ -58,6 +59,16 @@ export function NotificationsBell({
   const markAllRead = useMutation(api.notifications.markAllRead);
   const router = useRouter();
   const [markingAll, setMarkingAll] = useState(false);
+  const [readError, setReadError] = useState<string | null>(null);
+
+  async function handleMarkRead(id: Id<"notifications">) {
+    setReadError(null);
+    try {
+      await markRead({ notificationId: id });
+    } catch (cause) {
+      setReadError(errorMessage(cause, "No pudimos marcar el aviso como leído."));
+    }
+  }
 
   async function handleGo(id: Id<"notifications">, href: string | null, isRead: boolean) {
     if (!isRead) {
@@ -72,9 +83,12 @@ export function NotificationsBell({
   }
 
   async function handleMarkAll() {
+    setReadError(null);
     setMarkingAll(true);
     try {
       await markAllRead({});
+    } catch (cause) {
+      setReadError(errorMessage(cause, "No pudimos marcar los avisos como leídos."));
     } finally {
       setMarkingAll(false);
     }
@@ -86,6 +100,8 @@ export function NotificationsBell({
         type="button"
         className="relative inline-flex size-9 items-center justify-center rounded-full border border-border bg-card/80 text-foreground hover:border-foreground"
         aria-label={unreadCount > 0 ? `Avisos, ${unreadCount} sin leer` : "Avisos"}
+        aria-haspopup="dialog"
+        aria-expanded={open}
         onClick={() => setOpen(true)}
       >
         <Bell className="size-4" aria-hidden="true" />
@@ -96,10 +112,10 @@ export function NotificationsBell({
         )}
       </button>
 
-      {open && (
+      {open && typeof document !== "undefined" && createPortal(
         <AdminModal
           title={unreadCount > 0 ? `Avisos (${unreadCount} sin leer)` : "Avisos"}
-          onClose={() => setOpen(false)}
+          onClose={() => { setReadError(null); setOpen(false); }}
           footer={
             unreadCount > 0 ? (
               <Button
@@ -115,6 +131,7 @@ export function NotificationsBell({
             ) : undefined
           }
         >
+          {readError && <p role="alert" className="text-sm text-destructive">{readError}</p>}
           {items.length === 0 ? (
             <EmptyState
               icon={<Bell className="size-6" aria-hidden="true" />}
@@ -184,7 +201,7 @@ export function NotificationsBell({
                             type="button"
                             size="xs"
                             variant="ghost"
-                            onClick={() => void markRead({ notificationId: item._id })}
+                            onClick={() => void handleMarkRead(item._id)}
                           >
                             Marcar como leído
                           </Button>
@@ -196,7 +213,7 @@ export function NotificationsBell({
               })}
             </ul>
           )}
-        </AdminModal>
+        </AdminModal>, document.body,
       )}
     </>
   );

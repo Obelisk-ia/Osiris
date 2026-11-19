@@ -3,8 +3,8 @@ import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { formatFolio, loadAccountPaymentTotals } from "./model/billing";
 import { emitNotification } from "./model/notifications";
-import { computeItemProgress } from "./model/orders";
-import { accountState, orderStatus } from "./model/validators";
+import { computeItemProgress, dishOrderRestriction } from "./model/orders";
+import { accountState, buffetAdmission, orderStatus, serviceMode } from "./model/validators";
 
 const CALL_COOLDOWN_MS = 20_000;
 
@@ -53,6 +53,7 @@ const dinerAccountValidator = v.object({
   openedAt: v.number(),
   billRequestedAt: v.union(v.number(), v.null()),
   totalCents: v.number(),
+  buffetAdmission: v.union(buffetAdmission, v.null()),
   discountCents: v.number(),
   discountReason: v.union(v.string(), v.null()),
   paidCents: v.number(),
@@ -118,7 +119,7 @@ async function loadPublicMenu(
 
   const publishedDishes = await Promise.all(
     dishes
-      .filter((d) => (d.isPublished ?? true) && (!d.categoryId || activeCategoryIds.has(d.categoryId)))
+      .filter((dish) => !dishOrderRestriction(dish, location) && (!dish.categoryId || activeCategoryIds.has(dish.categoryId)))
       .map(async (dish) => {
         const [photoUrl, modLinks, recipeRows] = await Promise.all([
           dish.photoId ? ctx.storage.getUrl(dish.photoId) : Promise.resolve(null),
@@ -235,7 +236,7 @@ async function loadDinerAccountSummary(ctx: QueryCtx, account: Doc<"accounts">) 
     billLockReason = "Ya solicitaron la cuenta. Enseguida se acercará tu mesero.";
   } else if (account.state !== "open") {
     billLockReason = "Esta cuenta ya finalizó.";
-  } else if (totalUnits === 0) {
+  } else if (totalUnits === 0 && !account.buffetAdmission) {
     billLockReason = "Aún no hay platillos registrados en tu mesa.";
   } else if (hasUndelivered) {
     billLockReason =
@@ -252,6 +253,7 @@ async function loadDinerAccountSummary(ctx: QueryCtx, account: Doc<"accounts">) 
     openedAt: account._creationTime,
     billRequestedAt: account.billRequestedAt ?? null,
     totalCents: account.totalCents,
+    buffetAdmission: account.buffetAdmission ?? null,
     discountCents: account.discountCents ?? 0,
     discountReason: account.discountReason ?? null,
     paidCents: payTotals.paidCents,
@@ -297,6 +299,7 @@ export const tableByQrToken = query({
       locationName: v.string(),
       locationId: v.id("locations"),
       currencyCode: v.string(),
+      serviceMode,
       table: v.object({
         tableNumber: v.string(),
         sectionName: v.string(),
@@ -356,6 +359,7 @@ export const tableByQrToken = query({
       locationName: location.name,
       locationId: location._id,
       currencyCode: restaurant.currencyCode,
+      serviceMode: location.serviceMode,
       table: {
         tableNumber: table.tableNumber,
         sectionName: section?.name ?? "Salón",
@@ -377,6 +381,7 @@ export const publicMenu = query({
       restaurantName: v.string(),
       locationName: v.string(),
       currencyCode: v.string(),
+      serviceMode,
       categories: v.array(dinerCategoryValidator),
       dishes: v.array(dinerDishValidator),
     }),
@@ -395,6 +400,7 @@ export const publicMenu = query({
       restaurantName: restaurant.name,
       locationName: location.name,
       currencyCode: restaurant.currencyCode,
+      serviceMode: location.serviceMode,
       categories: menu.categories,
       dishes: menu.dishes,
     };
@@ -508,7 +514,7 @@ export const requestBill = mutation({
     }
 
     const summary = await loadDinerAccountSummary(ctx, account);
-    if (summary.totalUnits === 0) {
+    if (summary.totalUnits === 0 && !account.buffetAdmission) {
       throw new ConvexError("Aún no hay platillos registrados en esta mesa.");
     }
     if (summary.hasUndelivered) {

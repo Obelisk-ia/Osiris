@@ -47,6 +47,11 @@ export const workspace = v.union(
 export const preparationArea = v.union(
   v.literal("kitchen"), v.literal("bar"), v.literal("cocktails"), v.literal("coffee"),
 );
+export const serviceMode = v.union(v.literal("a_la_carte"), v.literal("buffet"), v.literal("mixed"));
+export const buffetPrices = v.object({ adultCents: v.number(), childCents: v.union(v.number(), v.null()) });
+export const buffetAdmission = v.object({
+  adults: v.number(), children: v.number(), adultCents: v.number(), childCents: v.number(),
+});
 export const paymentMethod = v.union(
   v.literal("efectivo"),
   v.literal("tarjeta"),

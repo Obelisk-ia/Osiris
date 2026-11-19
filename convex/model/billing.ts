@@ -38,14 +38,15 @@ export function computeAccountAmounts(
 
 export async function loadAccountGrossCents(
   ctx: QueryCtx,
-  accountId: Id<"accounts">,
+  account: Doc<"accounts">,
 ): Promise<{ grossCents: number; activeItemCount: number; activeUnits: number; hasUndelivered: boolean }> {
   const orders = await ctx.db
     .query("orders")
-    .withIndex("by_accountId", (q) => q.eq("accountId", accountId))
+    .withIndex("by_accountId", (q) => q.eq("accountId", account._id))
     .take(50);
 
-  let grossCents = 0;
+  const admission = account.buffetAdmission;
+  let grossCents = admission ? admission.adults * admission.adultCents + admission.children * admission.childCents : 0;
   let activeItemCount = 0;
   let activeUnits = 0;
   let hasUndelivered = false;
@@ -119,7 +120,7 @@ export async function recalculateAccountTotals(
     return { grossCents: 0, discountCents: 0, totalCents: 0, paidCents: 0, tipCents: 0 };
   }
   const [{ grossCents }, paymentTotals] = await Promise.all([
-    loadAccountGrossCents(ctx, accountId),
+    loadAccountGrossCents(ctx, account),
     loadAccountPaymentTotals(ctx, accountId),
   ]);
   const discount =

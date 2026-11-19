@@ -15,10 +15,13 @@ import { reconcileCancelledRecipe } from "./model/inventory";
 import { emitNotification } from "./model/notifications";
 import {
   computeItemProgress,
+  dishOrderRestriction,
+  ensureStationForArea,
   getDeliveredQuantity,
   getInventoryConsumedQuantity,
   getPrepReadyQuantity,
   getPrepStartedQuantity,
+  resolveDishAreas,
   resolveStationArea,
   resolveStationRole,
   syncAccountTableStatus,
@@ -27,6 +30,8 @@ import {
 } from "./model/orders";
 import {
   accountState,
+  buffetAdmission,
+  buffetPrices,
   discountKind,
   orderStatus,
   paymentMethod,
@@ -34,17 +39,17 @@ import {
   preparationArea,
   preparationStatus,
   reportedPaymentView,
+  serviceMode,
   tableStatus,
 } from "./model/validators";
 import {
-  PREPARATION_AREAS,
   PREPARATION_AREA_META,
+  usesAssignedTables,
   type PreparationArea,
 } from "../lib/restaurant-roles";
 
 const SERVICE_ROLES = ["waiter", "owner", "manager"] as const;
 const SERVICE_OR_CASHIER_ROLES = ["waiter", "owner", "manager", "cashier"] as const;
-const ALL_AREAS = PREPARATION_AREAS;
 const AREA_META = PREPARATION_AREA_META;
 
 const ORDER_STAGE_INDEX: Record<Doc<"orderItems">["status"], number> = {
@@ -71,14 +76,6 @@ function isCashierOrAdmin(staff: Doc<"staff">) {
   return isManagerOrOwner(staff) || staff.roles.includes("cashier");
 }
 
-function resolveDishAreas(dish: Doc<"dishes">): PreparationArea[] {
-  if (dish.areas && dish.areas.length > 0) {
-    const set = new Set(dish.areas);
-    return ALL_AREAS.filter((area) => set.has(area));
-  }
-  return dish.area === "barra" ? ["bar"] : ["kitchen"];
-}
-
 async function activeSectionAssignee(ctx: QueryCtx, sectionId: Id<"sections">): Promise<Id<"staff"> | null> {
   const latest = await ctx.db
     .query("sectionAssignments")
@@ -87,36 +84,6 @@ async function activeSectionAssignee(ctx: QueryCtx, sectionId: Id<"sections">): 
     .take(1);
   const current = latest[0];
   return current && current.endsAt === undefined ? current.assignedStaffId : null;
-}
-
-async function ensureStationForArea(
-  ctx: MutationCtx,
-  staff: Doc<"staff">,
-  area: PreparationArea,
-): Promise<Id<"preparationStations">> {
-  const meta = AREA_META[area];
-  const existing = await ctx.db
-    .query("preparationStations")
-    .withIndex("by_locationId_and_name", (q) => q.eq("locationId", staff.locationId).eq("name", meta.name))
-    .unique();
-  if (existing) {
-    if (!existing.isActive || existing.role !== meta.role || existing.area !== area) {
-      await ctx.db.patch("preparationStations", existing._id, {
-        isActive: true,
-        role: meta.role,
-        area,
-      });
-    }
-    return existing._id;
-  }
-  return await ctx.db.insert("preparationStations", {
-    organizationId: staff.organizationId,
-    locationId: staff.locationId,
-    name: meta.name,
-    role: meta.role,
-    area,
-    isActive: true,
-  });
 }
 
 async function allocateFolio(ctx: MutationCtx, staff: Doc<"staff">): Promise<number> {
@@ -555,6 +522,7 @@ const busyTableValidator = v.object({
   status: v.union(v.literal("occupied"), v.literal("partial"), v.literal("ready"), v.literal("payment")),
   progressStep: v.number(),
   itemCount: v.number(),
+  buffetGuestCount: v.number(),
   deliverableUnits: v.number(),
   deliveredUnits: v.number(),
   totalUnits: v.number(),
@@ -580,6 +548,8 @@ export const tablesSnapshot = query({
     restaurantName: v.string(),
     locationName: v.string(),
     currencyCode: v.string(),
+    serviceMode,
+    tableServiceEnabled: v.boolean(),
     staffId: v.id("staff"),
     staffName: v.string(),
     busyTables: v.array(busyTableValidator),
@@ -606,6 +576,7 @@ export const tablesSnapshot = query({
         .take(100),
     ]);
 
+    const tableServiceEnabled = !location || usesAssignedTables(location);
     const sectionMap = new Map(sections.map((s) => [s._id, s] as const));
     const staffNames = new Map(staffRows.map((s) => [s._id, s.displayName] as const));
     const sectionAssignees = new Map<Id<"sections">, Id<"staff"> | null>();
@@ -628,6 +599,7 @@ export const tablesSnapshot = query({
       status: "occupied" | "partial" | "ready" | "payment";
       progressStep: number;
       itemCount: number;
+      buffetGuestCount: number;
       deliverableUnits: number;
       deliveredUnits: number;
       totalUnits: number;
@@ -690,6 +662,7 @@ export const tablesSnapshot = query({
           status: summary.tableStatus,
           progressStep: summary.progressStep,
           itemCount: summary.totalUnits,
+          buffetGuestCount: activeAccount.buffetAdmission ? activeAccount.buffetAdmission.adults + activeAccount.buffetAdmission.children : 0,
           deliverableUnits: summary.deliverableUnits,
           deliveredUnits: summary.deliveredUnits,
           totalUnits: summary.totalUnits,
@@ -702,7 +675,7 @@ export const tablesSnapshot = query({
           areaSummaries: summary.areaSummaries,
           stationSections: summary.stationSections,
         });
-      } else {
+      } else if (tableServiceEnabled && (location?.serviceMode !== "buffet" || table.status === "empty")) {
         // Free table: visible if section is assigned to this waiter OR no one is in charge.
         if (!admin && sectionAssignee !== null && sectionAssignee !== staff._id) {
           continue;
@@ -725,6 +698,8 @@ export const tablesSnapshot = query({
       restaurantName: restaurant?.name ?? "Tu restaurante",
       locationName: location?.name ?? "Sucursal principal",
       currencyCode: restaurant?.currencyCode ?? "MXN",
+      serviceMode: location?.serviceMode ?? "mixed",
+      tableServiceEnabled,
       staffId: staff._id,
       staffName: staff.displayName,
       busyTables,
@@ -794,6 +769,9 @@ export const orderWorkspace = query({
     restaurantName: v.string(),
     locationName: v.string(),
     currencyCode: v.string(),
+    serviceMode,
+    tableServiceEnabled: v.boolean(),
+    buffetPrices: v.union(buffetPrices, v.null()),
     canTakeOrder: v.boolean(),
     canManageAccount: v.boolean(),
     canCharge: v.boolean(),
@@ -818,6 +796,7 @@ export const orderWorkspace = query({
         openedAt: v.number(),
         closedAt: v.union(v.number(), v.null()),
         totalCents: v.number(),
+        buffetAdmission: v.union(buffetAdmission, v.null()),
         discountKind: v.union(discountKind, v.null()),
         discountValue: v.union(v.number(), v.null()),
         discountCents: v.number(),
@@ -939,8 +918,6 @@ export const orderWorkspace = query({
       (isWaiter && ownsAccount) ||
       isManagerOrOwner(staff) ||
       (isCashier && isTakeoutAccount);
-    const canTakeOrder =
-      canManageAccount && (!account || account.state === "open");
     const canCharge = isCashierOrAdmin(staff);
     const canReopenClosed = isManagerOrOwner(staff);
 
@@ -999,7 +976,7 @@ export const orderWorkspace = query({
 
     const menuDishes = await Promise.all(
       dishes
-        .filter((d) => (d.isPublished ?? true) && (!d.categoryId || activeCategoryIds.has(d.categoryId)))
+        .filter((dish) => !dishOrderRestriction(dish, location) && (!dish.categoryId || activeCategoryIds.has(dish.categoryId)))
         .map(async (dish) => {
           const [photoUrl, modLinks, recipeRows] = await Promise.all([
             dish.photoId ? ctx.storage.getUrl(dish.photoId) : Promise.resolve(null),
@@ -1097,7 +1074,11 @@ export const orderWorkspace = query({
       restaurantName: restaurant?.name ?? "Tu restaurante",
       locationName: location?.name ?? "Sucursal principal",
       currencyCode: restaurant?.currencyCode ?? "MXN",
-      canTakeOrder,
+      serviceMode: location?.serviceMode ?? "mixed",
+      tableServiceEnabled: !location || usesAssignedTables(location),
+      buffetPrices: location?.buffetPrices ?? null,
+      canTakeOrder: canManageAccount && (!account || account.state === "open") &&
+        (location?.serviceMode !== "buffet" || (menuDishes.length > 0 && (!table || account !== null))),
       canManageAccount,
       canCharge,
       canReopenClosed,
@@ -1119,6 +1100,7 @@ export const orderWorkspace = query({
             openedAt: account._creationTime,
             closedAt: account.closedAt ?? null,
             totalCents: account.totalCents,
+            buffetAdmission: account.buffetAdmission ?? null,
             discountKind: account.discountKind ?? null,
             discountValue: account.discountValue ?? null,
             discountCents: account.discountCents ?? 0,
@@ -1293,6 +1275,56 @@ const orderLineInput = v.object({
   modifierOptionIds: v.array(v.id("modifierOptions")),
 });
 
+export const seatBuffetParty = mutation({
+  args: { tableId: v.id("diningTables"), adults: v.number(), children: v.number(), requestId: v.string() },
+  returns: v.id("accounts"),
+  handler: async (ctx, args) => {
+    const staff = await serviceStaff(ctx);
+    const requestId = `buffet-seating:${requiredText(args.requestId, "Registro de mesa", 80)}`;
+    const existing = await ctx.db.query("accounts")
+      .withIndex("by_locationId_and_requestId", (q) => q.eq("locationId", staff.locationId).eq("requestId", requestId))
+      .unique();
+    if (existing?.openedByStaffId === staff._id && existing.diningTableId === args.tableId &&
+        existing.buffetAdmission?.adults === args.adults && existing.buffetAdmission.children === args.children) {
+      return existing._id;
+    }
+    if (existing) throw new ConvexError("El grupo ya se registró. Revisa la mesa antes de intentarlo de nuevo.");
+
+    const [location, table] = await Promise.all([
+      ctx.db.get("locations", staff.locationId), ctx.db.get("diningTables", args.tableId),
+    ]);
+    if (!location || location.serviceMode !== "buffet" || !usesAssignedTables(location)) {
+      throw new ConvexError("La sucursal no tiene activo el registro de grupos en mesas de buffet.");
+    }
+    if (!table?.isActive || table.organizationId !== staff.organizationId || table.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esa mesa.");
+    }
+    await assertTableVisibleToStaff(ctx, staff, table);
+    const active = table.currentAccountId ? await ctx.db.get("accounts", table.currentAccountId) : null;
+    if (table.status !== "empty" || active?.state === "open" || active?.state === "awaiting_payment") {
+      throw new ConvexError("La mesa ya está ocupada. Elige otra mesa libre.");
+    }
+    const adults = safeInteger(args.adults, "Adultos");
+    const children = safeInteger(args.children, "Niños");
+    if (adults + children < 1 || adults + children > table.seatCount) {
+      throw new ConvexError(`Registra de 1 a ${table.seatCount} personas para esta mesa.`);
+    }
+    if (!location.buffetPrices) throw new ConvexError("Configura las tarifas del buffet en Características.");
+    const { adultCents, childCents = null } = location.buffetPrices;
+    const childRate = childCents ?? adultCents;
+    const now = Date.now();
+    const accountId = await ctx.db.insert("accounts", {
+      organizationId: staff.organizationId, locationId: staff.locationId, sectionId: table.sectionId,
+      diningTableId: table._id, assignedStaffId: staff._id, openedByStaffId: staff._id,
+      kind: "dine_in", state: "open", folio: await allocateFolio(ctx, staff), version: 1, requestId,
+      totalCents: adults * adultCents + children * childRate,
+      buffetAdmission: { adults, children, adultCents, childCents: childRate }, updatedAt: now,
+    });
+    await ctx.db.patch("diningTables", table._id, { currentAccountId: accountId, assignedStaffId: staff._id, status: "occupied" });
+    return accountId;
+  },
+});
+
 export const submitOrder = mutation({
   args: {
     tableId: v.optional(v.id("diningTables")),
@@ -1360,6 +1392,10 @@ export const submitOrder = mutation({
       throw new ConvexError("Indica una mesa o cuenta para tomar la orden.");
     }
 
+    if (location?.serviceMode === "buffet" && table && !account) {
+      throw new ConvexError("Registra al grupo antes de agregar extras a la mesa.");
+    }
+
     // Validate all dishes & modifiers before writing anything.
     const balances = autoSoldOut
       ? await ctx.db
@@ -1385,9 +1421,11 @@ export const submitOrder = mutation({
       const quantity = safeInteger(line.quantity, "Cantidad", 1);
       if (quantity > 99) throw new ConvexError("La cantidad máxima por línea es 99.");
       const dish = await ctx.db.get("dishes", line.dishId);
-      if (!dish || dish.organizationId !== staff.organizationId || !(dish.isPublished ?? true)) {
+      if (!dish || dish.organizationId !== staff.organizationId) {
         throw new ConvexError("Uno de los platillos ya no está disponible en el menú.");
       }
+      const restriction = dishOrderRestriction(dish, location);
+      if (restriction) throw new ConvexError(restriction);
       if (!dish.isAvailable) {
         throw new ConvexError(`${dish.name} está agotado y no se puede ordenar.`);
       }
@@ -2154,7 +2192,7 @@ export const reportPayment = mutation({
       loadAccountPaymentTotals(ctx, account._id),
     ]);
     const activeItems = items.filter((i) => i.status !== "cancelled");
-    if (activeItems.length === 0) {
+    if (activeItems.length === 0 && !account.buffetAdmission) {
       throw new ConvexError("Esta cuenta no tiene productos para reportar pago.");
     }
 
@@ -2297,7 +2335,7 @@ export const requestBill = mutation({
     }
     const items = await loadAccountItems(ctx, account._id);
     const activeItems = items.filter((i) => i.status !== "cancelled");
-    if (activeItems.length === 0) {
+    if (activeItems.length === 0 && !account.buffetAdmission) {
       throw new ConvexError("La cuenta todavía no tiene productos.");
     }
     const now = Date.now();
@@ -2380,6 +2418,9 @@ export const voidEmptyAccount = mutation({
     if (activeItems.length > 0) {
       throw new ConvexError("Esta cuenta ya tiene productos enviados.");
     }
+    if (account.buffetAdmission && (await loadAccountPaymentTotals(ctx, account._id)).confirmedCount > 0) {
+      throw new ConvexError("Esta entrada de buffet ya tiene un pago registrado.");
+    }
     const now = Date.now();
     await ctx.db.patch("accounts", account._id, {
       state: "voided",
@@ -2418,6 +2459,10 @@ export const moveAccountToTable = mutation({
     const target = await ctx.db.get("diningTables", args.targetTableId);
     if (!target || !target.isActive || target.locationId !== staff.locationId) {
       throw new ConvexError("No encontramos la mesa de destino.");
+    }
+    const admission = account.buffetAdmission;
+    if (admission && admission.adults + admission.children > target.seatCount) {
+      throw new ConvexError(`La mesa de destino admite hasta ${target.seatCount} personas.`);
     }
     if (target.currentAccountId) {
       const existing = await ctx.db.get("accounts", target.currentAccountId);

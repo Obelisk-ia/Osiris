@@ -12,22 +12,14 @@ import {
   useToast,
 } from "@/components/restaurant/admin/admin-ui";
 import { Button } from "@/components/ui/button";
-import { errorMessage } from "@/lib/format";
-import type { PreparationArea } from "@/lib/restaurant-roles";
+import { errorMessage, formatElapsedMinutes } from "@/lib/format";
+import { PREPARATION_AREA_META, type PreparationArea } from "@/lib/restaurant-roles";
 
 type Snapshot = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.kitchen.snapshot>>>;
 type Ticket = Snapshot["tickets"][number];
 type TicketItem = Ticket["items"][number];
+type Replenishment = Snapshot["replenishments"][number];
 type ColumnStage = "ordered" | "preparing" | "ready";
-
-function formatElapsedMinutes(createdAt: number, now: number): { mins: number; label: string } {
-  const mins = Math.max(0, Math.floor((now - createdAt) / 60_000));
-  if (mins < 1) return { mins: 0, label: "ahora" };
-  if (mins < 60) return { mins, label: `${mins} min` };
-  const hours = Math.floor(mins / 60);
-  const rem = mins % 60;
-  return { mins, label: `${hours} h ${rem} min` };
-}
 
 export function KitchenPanel({
   preloaded,
@@ -40,6 +32,7 @@ export function KitchenPanel({
   const markTicketReady = useMutation(api.kitchen.markTicketReady);
   const markItemReadyUnits = useMutation(api.kitchen.markItemReadyUnits);
   const acknowledgeCancelled = useMutation(api.kitchen.acknowledgeCancelledTicket);
+  const updateReplenishment = useMutation(api.buffet.updateReplenishment);
   const { toast, showToast } = useToast();
 
   const [areaFilter, setAreaFilter] = useState<"all" | PreparationArea>("all");
@@ -61,6 +54,7 @@ export function KitchenPanel({
     if (activeFilter === "all") return data.tickets;
     return data.tickets.filter((t) => t.area === activeFilter);
   }, [data.tickets, activeFilter]);
+  const visibleReplenishments = data.replenishments.filter((batch) => activeFilter === "all" || batch.area === activeFilter);
 
   const columns = useMemo(
     () => [
@@ -146,14 +140,28 @@ export function KitchenPanel({
     }
   }
 
+  async function updateBatch(batch: Replenishment, status: "preparing" | "ready") {
+    setBusyKey(batch._id);
+    try {
+      await updateReplenishment({ batchId: batch._id, status });
+      showToast(status === "preparing" ? "Bandeja en preparación" : "Bandeja lista para llevar");
+    } catch (cause) {
+      showToast(errorMessage(cause, "No pudimos actualizar la reposición."), "err");
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   const pageTitle =
     data.allowedAreas.length === 1
       ? `Pedidos de ${data.allowedAreas[0].name}`
       : "Pedidos por estación";
 
-  const orderedCount = columns[0].tickets.length;
-  const preparingCount = columns[1].tickets.length;
-  const readyCount = columns[2].tickets.length;
+  const board = columns.map((col) => {
+    const batches = visibleReplenishments.filter((batch) => batch.status === col.stage);
+    return { ...col, batches, count: col.tickets.length + batches.length };
+  });
+  const [ordered, preparing, ready] = board.map((col) => col.count);
 
   return (
     <div className="az-page">
@@ -163,7 +171,7 @@ export function KitchenPanel({
         restaurantName={data.restaurantName}
         locationName={data.locationName}
         title={pageTitle}
-        subtitle={`${orderedCount} nuevos · ${preparingCount} preparando · ${readyCount} listos`}
+        subtitle={`${ordered} ${ordered === 1 ? "nuevo" : "nuevos"} · ${preparing} en preparación · ${ready} ${ready === 1 ? "listo" : "listos"}`}
       />
 
       {showAreaFilters && (
@@ -174,10 +182,11 @@ export function KitchenPanel({
             aria-pressed={activeFilter === "all"}
             onClick={() => setAreaFilter("all")}
           >
-            Todas ({data.tickets.length})
+            Todas ({data.tickets.length + data.replenishments.length})
           </button>
           {data.allowedAreas.map((entry) => {
-            const count = data.tickets.filter((t) => t.area === entry.area).length;
+            const count = data.tickets.filter((t) => t.area === entry.area).length +
+              data.replenishments.filter((batch) => batch.area === entry.area).length;
             return (
               <button
                 key={entry.area}
@@ -193,29 +202,39 @@ export function KitchenPanel({
         </div>
       )}
 
-      {visibleTickets.length === 0 ? (
+      {visibleTickets.length === 0 && visibleReplenishments.length === 0 ? (
         <EmptyState
           icon={<ChefHat className="size-7" aria-hidden="true" />}
-          title="Sin pedidos activos"
+          title={data.allowedAreas.length ? "Sin pedidos activos" : "Área de preparación desactivada"}
           description={
-            data.allowedAreas.length === 1
+            data.allowedAreas.length === 0
+              ? "Administración puede activar el área en Menú → Áreas."
+              : data.allowedAreas.length === 1
               ? `Cuando un mesero envíe platillos para ${data.allowedAreas[0].name}, aparecerán aquí al instante.`
               : "Cuando los meseros envíen órdenes a tus estaciones, aparecerán aquí al instante."
           }
         />
       ) : (
         <div className="az-kitchen-board">
-          {columns.map((col) => (
+          {board.map((col) => (
             <section key={col.stage} className="az-kanban-col" aria-label={col.title}>
               <div className="az-kanban-head">
                 <span>{col.title}</span>
-                <span className="az-count">{col.tickets.length}</span>
+                <span className="az-count">{col.count}</span>
               </div>
 
-              {col.tickets.length === 0 ? (
-                <p className="text-xs text-muted-foreground py-3 px-1">{col.empty}</p>
-              ) : (
-                col.tickets.map((ticket) => (
+              {col.count === 0 && <p className="text-xs text-muted-foreground py-3 px-1">{col.empty}</p>}
+              {col.batches.map((batch) => (
+                <BuffetTicket
+                  key={batch._id}
+                  batch={batch}
+                  now={now}
+                  busy={busyKey === batch._id}
+                  showStation={showAreaFilters}
+                  onUpdate={(status) => void updateBatch(batch, status)}
+                />
+              ))}
+              {col.tickets.map((ticket) => (
                   <KitchenTicketCard
                     key={`${col.stage}-${ticket.key}`}
                     columnStage={col.stage}
@@ -231,8 +250,7 @@ export function KitchenPanel({
                     onReadyUnits={(item, qty) => void handleReadyUnits(item, qty, ticket)}
                     onAcknowledgeCancelled={() => void handleAcknowledgeCancelled(ticket)}
                   />
-                ))
-              )}
+              ))}
             </section>
           ))}
         </div>
@@ -240,6 +258,53 @@ export function KitchenPanel({
 
       <ToastBanner toast={toast} />
     </div>
+  );
+}
+
+function BuffetTicket({ batch, now, busy, showStation, onUpdate }: {
+  batch: Replenishment;
+  now: number;
+  busy: boolean;
+  showStation: boolean;
+  onUpdate: (status: "preparing" | "ready") => void;
+}) {
+  return (
+    <article className={`az-ticket${batch.status === "ready" ? " ready" : ""}`} aria-label={`Reposición de ${batch.dishName}`}>
+      <div className="az-ticket-head">
+        <div className="min-w-0">
+          <h3 className="az-ticket-title break-words">{batch.dishName}</h3>
+          <p className="text-sm text-muted-foreground break-words">{batch.destination}</p>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <span className="az-badge accent">Buffet</span>
+          <span className="az-badge">
+            <Clock aria-hidden="true" />{formatElapsedMinutes(batch.requestedAt, now).label}
+          </span>
+        </div>
+      </div>
+      <p className="text-sm font-medium">
+        1 bandeja · {batch.portions} {batch.portions === 1 ? "porción" : "porciones"}
+        {showStation && ` · ${PREPARATION_AREA_META[batch.area].name}`}
+      </p>
+      {batch.status === "ordered" && (
+        <Button className="site-button az-coral-cta w-full min-h-11" disabled={busy}
+          onClick={() => onUpdate("preparing")}>
+          <Flame aria-hidden="true" /> Empezar a preparar
+        </Button>
+      )}
+      {batch.status !== "ready" ? (
+        <Button
+          variant={batch.status === "ordered" ? "outline" : "default"}
+          className={`w-full min-h-11 ${batch.status === "preparing" ? "site-button" : ""}`}
+          disabled={busy}
+          onClick={() => onUpdate("ready")}
+        >
+          <Check aria-hidden="true" /> {batch.status === "ordered" ? "Ya está lista" : "Lista para llevar"}
+        </Button>
+      ) : (
+        <p className="text-sm font-semibold">Lista para llevar al buffet</p>
+      )}
+    </article>
   );
 }
 

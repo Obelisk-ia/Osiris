@@ -472,8 +472,10 @@ export function WaiterTablesPanel({
       {totalVisible === 0 ? (
         <EmptyState
           icon={<Grid2x2 className="size-7" aria-hidden="true" />}
-          title="Todavía no tienes mesas"
-          description="Cuando tu dueño o gerente agregue mesas al plano o te asigne una sección, aparecerán aquí."
+          title={data.tableServiceEnabled ? "Todavía no tienes mesas" : "La sucursal usa asientos libres"}
+          description={data.tableServiceEnabled ? "Cuando tu dueño o gerente agregue mesas al plano o te asigne una sección, aparecerán aquí."
+            : "Las reposiciones están en la pantalla de buffet."}
+          action={!data.tableServiceEnabled && <Link href="/cuenta/buffet" className="text-sm font-semibold underline">Volver al buffet</Link>}
         />
       ) : (
         <div className="grid gap-6">
@@ -550,11 +552,13 @@ export function WaiterTablesPanel({
                       />
                     ) : (
                       <p className="text-xs text-muted-foreground">
-                        Sin productos todavía. Entra para tomar la orden.
+                        {table.buffetGuestCount > 0
+                          ? `${table.buffetGuestCount} ${table.buffetGuestCount === 1 ? "comensal registrado" : "comensales registrados"}`
+                          : data.serviceMode === "buffet" ? "Sin extras pedidos." : "Sin productos todavía. Entra para tomar la orden."}
                       </p>
                     )}
 
-                    {table.status === "payment" && (
+                    {table.status === "payment" && table.balanceCents > 0 && (
                       table.reportedPayment ? (
                         <div className="az-notice warn">
                           <BadgeCheck className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
@@ -633,7 +637,7 @@ export function WaiterTablesPanel({
                           </span>
                         )}
                       </span>
-                      <span className="az-waiter-cta">Tomar orden</span>
+                      <span className="az-waiter-cta">{data.serviceMode === "buffet" ? "Sentar grupo" : "Tomar orden"}</span>
                       <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                     </Link>
                   </li>

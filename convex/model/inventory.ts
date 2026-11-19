@@ -3,6 +3,17 @@ import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import { safeInteger } from "./access";
 
+export async function buffetBatchIngredients(
+  ctx: MutationCtx,
+  staff: Doc<"staff">,
+  batch: Doc<"buffetBatches">,
+  now: number,
+) {
+  if (batch.inventoryConsumedAt !== undefined) return {};
+  await consumeRecipe(ctx, staff, batch.dishId, batch.portions, `buffet-batch:${batch._id}`);
+  return { inventoryConsumedAt: now, startedByStaffId: staff._id };
+}
+
 export async function consumeRecipe(
   ctx: MutationCtx,
   staff: Doc<"staff">,

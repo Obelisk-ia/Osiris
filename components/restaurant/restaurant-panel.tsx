@@ -16,7 +16,8 @@ export function RestaurantPanel() {
   if (registration === null) return <LinkButton href="/crear-cuenta">Volver a mi registro</LinkButton>;
   const { staff, restaurant, location } = registration;
   if (!staff.isActive) return <p role="alert">Tu acceso a este restaurante está desactivado. Habla con el dueño para recuperarlo.</p>;
-  const available = workspaces.filter((workspace) => canAccessWorkspace(staff.roles, workspace.value));
+  const available = workspaces.filter((workspace) => canAccessWorkspace(staff.roles, workspace.value) &&
+    (workspace.value !== "buffet" || location.serviceMode !== "a_la_carte"));
   return (
     <div className="restaurant-panel">
       <div>

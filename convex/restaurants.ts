@@ -3,7 +3,7 @@ import { ConvexError, v } from "convex/values";
 import { components } from "./_generated/api";
 import { mutation, query, type MutationCtx } from "./_generated/server";
 import { requireStaff, requireUser, requiredText } from "./model/access";
-import { operationalRole } from "./model/validators";
+import { operationalRole, serviceMode } from "./model/validators";
 import schema from "./schema";
 
 const limiter = new RateLimiter(components.rateLimiter, {
@@ -30,7 +30,7 @@ async function newCode(ctx: MutationCtx) {
 }
 
 const onboarding = v.union(
-  v.object({ kind: v.literal("owner"), displayName: v.string(), restaurantName: v.string() }),
+  v.object({ kind: v.literal("owner"), displayName: v.string(), restaurantName: v.string(), serviceMode: v.optional(serviceMode) }),
   v.object({ kind: v.literal("staff"), displayName: v.string(), code: v.string(), roles: v.array(operationalRole) }),
 );
 const registrationResult = v.union(
@@ -54,7 +54,7 @@ export const completeRegistration = mutation({
       const locationId = await ctx.db.insert("locations", {
         organizationId, name, timeZone: "America/Mexico_City",
         guestOrderMode: "confirmation", maxPendingGuestOrders: 10,
-        restrictWaitersToAssignedTables: false, serviceMode: "mixed",
+        restrictWaitersToAssignedTables: false, serviceMode: registration.serviceMode ?? "mixed",
       });
       await ctx.db.patch("organizations", organizationId, { firstLocationId: locationId });
       const staffId = await ctx.db.insert("staff", {

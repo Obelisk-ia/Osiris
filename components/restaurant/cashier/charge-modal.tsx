@@ -65,6 +65,7 @@ export type ChargeTarget = {
   discountCents: number;
   paidCents: number;
   balanceCents: number;
+  buffetGuestCount?: number;
   reportedPayment?: ReportedPaymentInfo | null;
 };
 
@@ -116,7 +117,8 @@ export function ChargeModal({
     attachedToShift: boolean;
   } | null>(null);
 
-  const isZeroCourtesy = target.balanceCents === 0 && target.discountCents > 0;
+  const isZeroCourtesy = target.totalCents === 0 && target.balanceCents === 0 &&
+    (target.discountCents > 0 || Boolean(target.buffetGuestCount));
 
   const tipCents = (() => {
     if (isZeroCourtesy || tipMode === "none") return 0;
@@ -386,6 +388,9 @@ export function ChargeModal({
             <span>Folio A-{String(target.folio).padStart(4, "0")}</span>
             <span>Total cuenta: {formatMoney(target.totalCents, currencyCode)}</span>
           </div>
+          {!!target.buffetGuestCount && <div className="text-xs text-muted-foreground">
+            <span>Entrada de buffet</span><span>{target.buffetGuestCount} personas</span>
+          </div>}
           {target.discountCents > 0 && (
             <div className="text-xs text-muted-foreground">
               <span>Descuento aplicado</span>
