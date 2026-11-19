@@ -19,6 +19,7 @@ import {
   Sliders,
   Users,
   UtensilsCrossed,
+  Wallet,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -41,6 +42,7 @@ export type AdminNavItem = {
 export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
   { id: "mesas", label: "Mesas", href: "/cuenta/mesas", icon: Grid2x2 },
   { id: "cocina", label: "Cocina", href: "/cuenta/cocina", icon: ChefHat },
+  { id: "caja", label: "Caja", href: "/cuenta/caja", icon: Wallet },
   { id: "inventario", label: "Inventario", href: "/cuenta/administracion/inventario", icon: Package },
   { id: "menu", label: "Menú", href: "/cuenta/administracion/menu", icon: BookOpen },
   { id: "buffet", label: "Buffet", href: "/cuenta/administracion/buffet", icon: UtensilsCrossed },
@@ -95,6 +97,8 @@ export function AdminShell({
   const roleLabel = formatRoles(roles).join(" · ");
 
   const ownerCode = useQuery(api.restaurants.ownerCode, canQuery && isOwner ? {} : "skip");
+  const cashierSnap = useQuery(api.cashier.snapshot, canQuery ? {} : "skip");
+  const readyToPayCount = cashierSnap?.readyAccounts.length ?? 0;
   const rotateCode = useMutation(api.restaurants.rotateCode);
 
   const menuWrapRef = useRef<HTMLDivElement>(null);
@@ -256,7 +260,10 @@ export function AdminShell({
                 <span className="az-nav-num" aria-hidden="true">
                   {toRoman(idx + 1)}
                 </span>
-                <span>{item.label}</span>
+                <span className="flex-1">{item.label}</span>
+                {item.id === "caja" && readyToPayCount > 0 && (
+                  <span className="az-count">{readyToPayCount}</span>
+                )}
               </Link>
             );
           })}

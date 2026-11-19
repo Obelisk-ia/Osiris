@@ -1,8 +1,9 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import {
-  accountState, canvas, inventoryKind, notificationKind, orderStatus, preparationArea, preparationStatus,
-  staffRole, stationRole, submissionState, tableShape, tableStatus,
+  accountState, canvas, cashMovementKind, discountKind, inventoryKind, notificationKind, orderStatus,
+  paymentMethod, paymentStatus, preparationArea, preparationStatus, reportedPayment, staffRole, stationRole,
+  submissionState, tableShape, tableStatus,
 } from "./model/validators";
 
 const organization = { organizationId: v.id("organizations") };
@@ -143,6 +144,14 @@ export default defineSchema({
     customerName: v.optional(v.string()), customerPhone: v.optional(v.string()),
     phoneConsentAt: v.optional(v.number()), privacyNoticeVersion: v.optional(v.string()),
     promisedAt: v.optional(v.number()), billRequestedAt: v.optional(v.number()),
+    discountKind: v.optional(discountKind),
+    discountValue: v.optional(v.number()),
+    discountCents: v.optional(v.number()),
+    discountReason: v.optional(v.string()),
+    discountByStaffId: v.optional(v.id("staff")),
+    paidCents: v.optional(v.number()),
+    tipCents: v.optional(v.number()),
+    reportedPayment: v.optional(reportedPayment),
     closedAt: v.optional(v.number()), updatedAt: v.number(),
   }).index("by_locationId_and_state", ["locationId", "state"])
     .index("by_locationId_and_folio", ["locationId", "folio"])
@@ -259,4 +268,45 @@ export default defineSchema({
     readByStaffIds: v.array(v.id("staff")),
     createdAt: v.number(),
   }).index("by_locationId_and_createdAt", ["locationId", "createdAt"]),
+
+  cashShifts: defineTable({
+    ...scope,
+    cashierStaffId: v.id("staff"),
+    openedAt: v.number(),
+    fundCents: v.number(),
+    closedAt: v.optional(v.number()),
+    countedCashCents: v.optional(v.number()),
+    expectedCashCents: v.optional(v.number()),
+    closedByStaffId: v.optional(v.id("staff")),
+  }).index("by_locationId_and_openedAt", ["locationId", "openedAt"]),
+
+  cashShiftMovements: defineTable({
+    ...scope,
+    shiftId: v.id("cashShifts"),
+    kind: cashMovementKind,
+    amountCents: v.number(),
+    reason: v.string(),
+    createdByStaffId: v.id("staff"),
+    createdAt: v.number(),
+  }).index("by_shiftId", ["shiftId"]),
+
+  payments: defineTable({
+    ...scope,
+    accountId: v.id("accounts"),
+    shiftId: v.optional(v.id("cashShifts")),
+    method: paymentMethod,
+    amountCents: v.number(),
+    tipCents: v.number(),
+    receivedCents: v.number(),
+    changeCents: v.number(),
+    terminalFolio: v.optional(v.string()),
+    status: paymentStatus,
+    createdByStaffId: v.id("staff"),
+    createdAt: v.number(),
+    revertedAt: v.optional(v.number()),
+    revertedByStaffId: v.optional(v.id("staff")),
+    revertReason: v.optional(v.string()),
+  }).index("by_accountId", ["accountId"])
+    .index("by_shiftId", ["shiftId"])
+    .index("by_locationId_and_createdAt", ["locationId", "createdAt"]),
 });

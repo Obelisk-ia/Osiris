@@ -4,6 +4,8 @@ import { Suspense } from "react";
 import { api } from "@/convex/_generated/api";
 import { Brand } from "@/components/brand";
 import { AdminShell } from "@/components/restaurant/admin/admin-shell";
+import { CashierPanel } from "@/components/restaurant/cashier/cashier-panel";
+import { CashierShell } from "@/components/restaurant/cashier/cashier-shell";
 import { FloorPanel } from "@/components/restaurant/floor/floor-panel";
 import { KitchenPanel } from "@/components/restaurant/kitchen/kitchen-panel";
 import { KitchenShell } from "@/components/restaurant/kitchen/kitchen-shell";
@@ -24,6 +26,8 @@ async function WorkspaceContent({ params }: { params: Promise<{ workspace: strin
   if (!registration?.staff.isActive || !canAccessWorkspace(registration.staff.roles, definition.value)) redirect("/cuenta");
 
   const isAdmin = registration.staff.roles.some((role) => role === "owner" || role === "manager");
+  const isWaiter = registration.staff.roles.includes("waiter");
+  const isCashier = registration.staff.roles.includes("cashier");
 
   if (definition.value === "mesas") {
     if (isAdmin) {
@@ -39,6 +43,19 @@ async function WorkspaceContent({ params }: { params: Promise<{ workspace: strin
         </AdminShell>
       );
     }
+    if (isCashier && !isWaiter) {
+      const floor = await preloadQuery(api.floor.snapshot, {}, options);
+      return (
+        <CashierShell
+          initialRestaurantName={registration.restaurant.name}
+          initialLocationName={registration.location.name}
+          initialStaffName={registration.staff.displayName}
+          initialRoles={registration.staff.roles as StaffRole[]}
+        >
+          <FloorPanel preloaded={floor} embedded locationName={registration.location.name} />
+        </CashierShell>
+      );
+    }
     const waiterTables = await preloadQuery(api.waiter.tablesSnapshot, {}, options);
     return (
       <WaiterShell
@@ -49,6 +66,32 @@ async function WorkspaceContent({ params }: { params: Promise<{ workspace: strin
       >
         <WaiterTablesPanel preloaded={waiterTables} />
       </WaiterShell>
+    );
+  }
+
+  if (definition.value === "caja") {
+    const cashier = await preloadQuery(api.cashier.snapshot, {}, options);
+    if (isAdmin) {
+      return (
+        <AdminShell
+          initialRestaurantName={registration.restaurant.name}
+          initialLocationName={registration.location.name}
+          initialStaffName={registration.staff.displayName}
+          initialRoles={registration.staff.roles as StaffRole[]}
+        >
+          <CashierPanel preloaded={cashier} pageIndex={3} pageTotal={10} />
+        </AdminShell>
+      );
+    }
+    return (
+      <CashierShell
+        initialRestaurantName={registration.restaurant.name}
+        initialLocationName={registration.location.name}
+        initialStaffName={registration.staff.displayName}
+        initialRoles={registration.staff.roles as StaffRole[]}
+      >
+        <CashierPanel preloaded={cashier} pageIndex={1} pageTotal={3} />
+      </CashierShell>
     );
   }
 

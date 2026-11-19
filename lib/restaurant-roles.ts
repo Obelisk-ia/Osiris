@@ -99,9 +99,9 @@ export function formatRoles(roles: readonly StaffRole[]): string[] {
 
 export const workspaces = [
   { value: "administracion", label: "Administración", description: "Menú, inventario, buffet, QR, equipo y sucursales.", roles: ["owner", "manager"] },
-  { value: "mesas", label: "Mesas", description: "El salón y las mesas que atiendes.", roles: ["waiter"] },
+  { value: "mesas", label: "Mesas", description: "El salón y las mesas que atiendes.", roles: ["waiter", "cashier"] },
   { value: "cocina", label: "Cocina y estaciones", description: "La preparación de cada pedido por área.", roles: ["chef", "bar", "bartender", "barista"] },
-  { value: "caja", label: "Caja", description: "Las cuentas pendientes de pago.", roles: ["cashier"] },
+  { value: "caja", label: "Caja", description: "Cobros, turnos, cortes e historial.", roles: ["cashier"] },
   { value: "buffet", label: "Buffet", description: "Los menús y el servicio de buffet.", roles: ["waiter", "chef", "bar", "bartender", "barista"] },
 ] as const;
 export type Workspace = typeof workspaces[number]["value"];

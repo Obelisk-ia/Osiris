@@ -4,6 +4,8 @@ Restaurant operations platform built with Next.js 16, React 19, shadcn/ui
 (Base UI), and Convex. The Spanish landing and access pages preserve the
 editorial design and original collages from `../osiris design`.
 
+> **Guía paso a paso de pruebas manuales y simulación de roles:** consulta **[TESTING.md](./TESTING.md)** para crear usuarios de cada rol (`Dueño`, `Mesero`, `Chef`, `Barra`, `Bartender`, `Barista`, `Caja`), configurar inventario/menú/QR y simular todos los casos de uso (incluyendo la vista QR del comensal y el flujo antifraude *Mesero reporta pago → Caja confirma*).
+
 ## Development
 
 ```sh
@@ -73,12 +75,16 @@ unavailable; users must keep their password safe.
 | `/` | Landing page |
 | `/acceso` | Sign in |
 | `/crear-cuenta` | Single owner/employee signup form: account, restaurant details, and roles |
-| `/cuenta` | Dashboard with workspace selection, owner code, and sign-out |
-| `/cuenta/administracion` | Owner/manager team overview |
-| `/cuenta/mesas` | Interactive floor plan (owner/manager editor, read-only for staff) |
-| `/cuenta/cocina` | Chef/barista/bartender preparation overview |
-| `/cuenta/caja` | Cashier accounts awaiting payment |
-| `/cuenta/buffet` | Buffet menu overview |
+| `/cuenta` | Role router (redirects staff directly to their operational shell) |
+| `/cuenta/mesas` | Interactive floor plan for owner/manager/cashier; *Mis mesas* plate checklist for waiters |
+| `/cuenta/mesero/mesa/[tableId]` | Order taking and live bill workspace for a table |
+| `/cuenta/mesero/cuenta/[accountId]` | Account detail, plate delivery, discounts, payment report & cashier charging |
+| `/cuenta/mesero/llevar` | Kanban board for takeaway, pickup, and counter accounts |
+| `/cuenta/cocina` | Role-filtered preparation Kanban (`Chef` → Cocina, `Barra` → Barra, `Bartender` → Coctelería, `Barista` → Cafetería) |
+| `/cuenta/caja` | Cashier workspace: *Cobrar*, *Turno y corte*, *Ya cobradas*, and *Agotados* |
+| `/cuenta/administracion/*` | Owner/manager suite: Inventario, Menú, Buffet, Códigos QR, Características, Miembros, Sucursales |
+| `/mesa/[qrToken]` | Public QR diner view: live menu, table bill status, *Llamar al mesero*, and delivery-gated *Pedir la cuenta* |
+| `/menu/[locationId]` | Public read-only digital menu for a branch |
 
 New passwords require at least 10 characters (Convex Auth's policy).
 Registration uses one form: choose **Soy dueño** or **Soy empleado**, enter your
