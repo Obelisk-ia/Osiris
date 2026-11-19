@@ -89,12 +89,15 @@ let draftSeq = 1;
 
 export function OrderPanel({
   preloaded,
-  returnHref = "/cuenta/mesas",
+  returnHref: workspaceReturnHref,
 }: {
   preloaded: Preloaded<typeof api.waiter.orderWorkspace>;
   returnHref?: string;
 }) {
   const data = usePreloadedQuery(preloaded);
+  const returnHref = workspaceReturnHref ?? (
+    data.account && data.account.kind !== "dine_in" ? "/cuenta/mesero/llevar" : "/cuenta/mesas"
+  );
   const router = useRouter();
   const { toast, showToast } = useToast();
 

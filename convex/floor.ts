@@ -37,13 +37,12 @@ async function sectionsFor(ctx: QueryCtx, locationId: Doc<"staff">["locationId"]
     .take(50);
 }
 
-async function assignedStaff(ctx: QueryCtx, sectionId: Id<"sections">) {
-  const assignments = await ctx.db.query("sectionAssignments")
+async function activeSectionAssignment(ctx: QueryCtx, sectionId: Id<"sections">) {
+  const latest = await ctx.db.query("sectionAssignments")
     .withIndex("by_sectionId_and_startsAt", (q) => q.eq("sectionId", sectionId))
     .order("desc")
-    .take(1);
-  const active = assignments[0];
-  return active && active.endsAt === undefined ? active.assignedStaffId : null;
+    .first();
+  return latest && latest.endsAt === undefined ? latest : null;
 }
 
 async function tableStatusFor(ctx: QueryCtx, table: Doc<"diningTables">): Promise<Doc<"diningTables">["status"]> {
@@ -78,7 +77,7 @@ export const snapshot = query({
     ]);
     const sectionViews = await Promise.all(sections.map(async (section) => ({
       ...section,
-      assignedStaffId: await assignedStaff(ctx, section._id),
+      assignedStaffId: (await activeSectionAssignment(ctx, section._id))?.assignedStaffId ?? null,
       tableCount: tables.filter((table) => table.sectionId === section._id).length,
     })));
     // Older test types may still carry unused width/height fields; strip them
@@ -112,6 +111,23 @@ async function editor(ctx: MutationCtx) {
   return await requireStaff(ctx, undefined, undefined, EDITORS);
 }
 
+async function assignSection(
+  ctx: MutationCtx,
+  staff: Doc<"staff">,
+  sectionId: Id<"sections">,
+  assignedStaffId: Id<"staff">,
+  startsAt: number,
+) {
+  const waiter = await ctx.db.get("staff", assignedStaffId);
+  if (!waiter?.isActive || waiter.locationId !== staff.locationId || !waiter.roles.includes("waiter")) {
+    throw new ConvexError("Selecciona un mesero activo de esta sucursal.");
+  }
+  await ctx.db.insert("sectionAssignments", {
+    organizationId: staff.organizationId, locationId: staff.locationId, sectionId,
+    assignedStaffId, assignedByStaffId: staff._id, startsAt,
+  });
+}
+
 function canvasForTable(section: Doc<"sections">, x: number, y: number) {
   if ([x, y].some((part) => !Number.isFinite(part)) || x < 8 || x > 92 || y < 12 || y > 88) {
     throw new ConvexError("Posición: coloca la mesa dentro del 8–92 % de ancho y 12–88 % de alto de la sección.");
@@ -139,10 +155,7 @@ export const createSection = mutation({
       sortOrder: Math.max(0, ...sections.map((section) => section.sortOrder)) + 1, canvas: desired,
     });
     if (args.assignedStaffId) {
-      await ctx.db.insert("sectionAssignments", {
-        organizationId: staff.organizationId, locationId: staff.locationId, sectionId,
-        assignedStaffId: args.assignedStaffId, assignedByStaffId: staff._id, startsAt: Date.now(),
-      });
+      await assignSection(ctx, staff, sectionId, args.assignedStaffId, Date.now());
     }
     return sectionId;
   },
@@ -165,19 +178,14 @@ export const updateSection = mutation({
       description: args.description?.trim().slice(0, 80) || undefined,
       canvas: desired,
     });
-    const current = await assignedStaff(ctx, section._id);
-    if (current !== (args.assignedStaffId ?? null)) {
-      const history = await ctx.db.query("sectionAssignments")
-        .withIndex("by_sectionId_and_startsAt", (q) => q.eq("sectionId", section._id))
-        .order("desc").take(1);
-      if (history[0]?.endsAt === undefined) {
-        await ctx.db.patch("sectionAssignments", history[0]._id, { endsAt: Date.now() });
+    const current = await activeSectionAssignment(ctx, section._id);
+    if (current?.assignedStaffId !== args.assignedStaffId) {
+      const now = Date.now();
+      if (current) {
+        await ctx.db.patch("sectionAssignments", current._id, { endsAt: now });
       }
       if (args.assignedStaffId) {
-        await ctx.db.insert("sectionAssignments", {
-          organizationId: staff.organizationId, locationId: staff.locationId, sectionId: section._id,
-          assignedStaffId: args.assignedStaffId, assignedByStaffId: staff._id, startsAt: Date.now(),
-        });
+        await assignSection(ctx, staff, section._id, args.assignedStaffId, now);
       }
     }
     return null;

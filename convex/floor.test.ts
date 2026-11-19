@@ -68,6 +68,39 @@ describe("owner floor plan", () => {
       .rejects.toThrow(/Ya existe/);
   });
 
+  it("assigns an existing section with no history and preserves assignment changes", async () => {
+    const { t, owner, code, sectionId } = await seed();
+    const waiter = await authenticatedCaller(t, "section-waiter@example.com");
+    const registration = await waiter.mutation(api.restaurants.completeRegistration, {
+      registration: { kind: "staff", displayName: "Mesero", code, roles: ["waiter"] },
+    });
+    if (!registration.success) throw new Error(registration.message);
+    const assignedStaffId = registration.staffId;
+    const section = { sectionId, name: "Salón", canvas: first };
+
+    await owner.mutation(api.floor.updateSection, { ...section, assignedStaffId });
+    expect((await owner.query(api.floor.snapshot)).sections[0].assignedStaffId).toBe(assignedStaffId);
+
+    await owner.mutation(api.floor.updateSection, { ...section, assignedStaffId });
+    await owner.mutation(api.floor.updateSection, section);
+    expect((await owner.query(api.floor.snapshot)).sections[0].assignedStaffId).toBeNull();
+
+    await owner.mutation(api.floor.updateSection, { ...section, assignedStaffId });
+    const history = await t.run((ctx) => ctx.db.query("sectionAssignments")
+      .withIndex("by_sectionId_and_startsAt", (q) => q.eq("sectionId", sectionId)).take(3));
+    expect(history).toHaveLength(2);
+    expect(history[0].endsAt).toBeDefined();
+    expect(history[1].endsAt).toBeUndefined();
+
+    const { registration: otherRestaurant } = await createRestaurant(t, "other-floor-owner@example.com");
+    await expect(owner.mutation(api.floor.updateSection, {
+      ...section, name: "Cambio inválido", assignedStaffId: otherRestaurant.staff._id,
+    })).rejects.toThrow("Selecciona un mesero activo de esta sucursal.");
+    expect((await owner.query(api.floor.snapshot)).sections[0]).toMatchObject({
+      name: section.name, assignedStaffId,
+    });
+  });
+
   it("protects sections with tables and types in use from deletion", async () => {
     const { owner, sectionId, tableTypeId } = await seed();
     await owner.mutation(api.floor.createTable, { sectionId, tableTypeId, tableNumber: "Mesa 1", x: 50, y: 50 });
