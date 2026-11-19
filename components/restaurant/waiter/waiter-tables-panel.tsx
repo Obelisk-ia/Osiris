@@ -19,11 +19,15 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
   AdminPageHead,
-  ConfirmModal,
   EmptyState,
   ToastBanner,
   useToast,
 } from "@/components/restaurant/admin/admin-ui";
+import { PAYMENT_METHOD_LABELS } from "@/components/restaurant/cashier/charge-modal";
+import {
+  ReportPaymentModal,
+  type ReportPaymentTarget,
+} from "@/components/restaurant/waiter/report-payment-modal";
 import { Button } from "@/components/ui/button";
 import { readDraftSummaries, type StoredDraftSummary } from "@/lib/draft-storage";
 import { errorMessage, formatMoney } from "@/lib/format";
@@ -400,16 +404,9 @@ export function WaiterTablesPanel({
   const data = usePreloadedQuery(preloaded);
   const deliverOrderItem = useMutation(api.waiter.deliverOrderItem);
   const deliverReady = useMutation(api.waiter.deliverReadyItems);
-  const confirmPayment = useMutation(api.waiter.confirmPayment);
   const { toast, showToast } = useToast();
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [payingTarget, setPayingTarget] = useState<{
-    accountId: Id<"accounts">;
-    tableNumber: string;
-    folio: number;
-    totalCents: number;
-  } | null>(null);
-  const [payingPending, setPayingPending] = useState(false);
+  const [reportingTarget, setReportingTarget] = useState<ReportPaymentTarget | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [draftsByKey, setDraftsByKey] = useState<Record<string, StoredDraftSummary>>({});
 
@@ -456,20 +453,6 @@ export function WaiterTablesPanel({
       showToast(errorMessage(cause, "No pudimos marcarlo como entregado."), "err");
     } finally {
       setBusyKey(null);
-    }
-  }
-
-  async function handleConfirmPayment() {
-    if (!payingTarget) return;
-    setPayingPending(true);
-    try {
-      await confirmPayment({ accountId: payingTarget.accountId });
-      showToast(`${payingTarget.tableNumber} pagada y liberada`);
-      setPayingTarget(null);
-    } catch (cause) {
-      showToast(errorMessage(cause, "No pudimos confirmar el pago."), "err");
-    } finally {
-      setPayingPending(false);
     }
   }
 
@@ -572,21 +555,55 @@ export function WaiterTablesPanel({
                     )}
 
                     {table.status === "payment" && (
-                      <Button
-                        type="button"
-                        className="site-button w-full"
-                        onClick={() =>
-                          setPayingTarget({
-                            accountId: table.accountId,
-                            tableNumber: table.tableNumber,
-                            folio: table.folio,
-                            totalCents: table.totalCents,
-                          })
-                        }
-                      >
-                        <BadgeCheck className="size-4" aria-hidden="true" />
-                        Confirmar pago · {formatMoney(table.totalCents, data.currencyCode)}
-                      </Button>
+                      table.reportedPayment ? (
+                        <div className="az-notice warn">
+                          <BadgeCheck className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
+                          <div className="flex flex-1 flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs">
+                              Reportaste{" "}
+                              <strong>
+                                {formatMoney(table.reportedPayment.receivedCents, data.currencyCode)}
+                              </strong>{" "}
+                              ({PAYMENT_METHOD_LABELS[table.reportedPayment.method]}). Esperando
+                              confirmación de Caja para liberar la mesa.
+                            </span>
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant="outline"
+                              onClick={() =>
+                                setReportingTarget({
+                                  accountId: table.accountId,
+                                  label: table.tableNumber,
+                                  folio: table.folio,
+                                  balanceCents: table.balanceCents,
+                                  existingReport: table.reportedPayment,
+                                })
+                              }
+                            >
+                              Editar reporte
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="w-full"
+                          onClick={() =>
+                            setReportingTarget({
+                              accountId: table.accountId,
+                              label: table.tableNumber,
+                              folio: table.folio,
+                              balanceCents: table.balanceCents,
+                              existingReport: null,
+                            })
+                          }
+                        >
+                          <Receipt className="size-4" aria-hidden="true" />
+                          Reportar pago a caja · {formatMoney(table.balanceCents, data.currencyCode)}
+                        </Button>
+                      )
                     )}
                   </article>
                 );
@@ -627,14 +644,15 @@ export function WaiterTablesPanel({
         </div>
       )}
 
-      {payingTarget && (
-        <ConfirmModal
-          title={`Confirmar pago de ${payingTarget.tableNumber}`}
-          message={`Folio A-${String(payingTarget.folio).padStart(4, "0")} por ${formatMoney(payingTarget.totalCents, data.currencyCode)}. Al confirmar, la cuenta se cerrará y la mesa quedará libre de nuevo.`}
-          confirmLabel="Sí, confirmar pago"
-          pending={payingPending}
-          onConfirm={() => void handleConfirmPayment()}
-          onClose={() => setPayingTarget(null)}
+      {reportingTarget && (
+        <ReportPaymentModal
+          target={reportingTarget}
+          currencyCode={data.currencyCode}
+          onClose={() => setReportingTarget(null)}
+          onReported={(msg) => {
+            setReportingTarget(null);
+            showToast(msg);
+          }}
         />
       )}
 

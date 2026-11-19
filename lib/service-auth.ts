@@ -10,7 +10,9 @@ export async function requireServiceSession() {
   const registration = await fetchQuery(api.restaurants.current, {}, options);
   if (
     !registration?.staff.isActive ||
-    !registration.staff.roles.some((role) => role === "waiter" || role === "owner" || role === "manager")
+    !registration.staff.roles.some(
+      (role) => role === "waiter" || role === "cashier" || role === "owner" || role === "manager",
+    )
   ) {
     redirect("/cuenta");
   }

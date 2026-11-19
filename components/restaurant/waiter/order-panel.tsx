@@ -10,13 +10,16 @@ import {
   Edit3,
   Minus,
   MoreVertical,
+  Percent,
   Plus,
   Receipt,
+  RotateCcw,
   Search,
   Send,
   Undo2,
   UserCheck,
   Utensils,
+  Wallet,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
@@ -32,6 +35,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { loadStoredDraft, saveStoredDraft } from "@/lib/draft-storage";
 import { errorMessage, formatDateTime, formatMoney } from "@/lib/format";
+import {
+  ChargeModal,
+  DiscountModal,
+  PAYMENT_METHOD_LABELS,
+  ReopenAccountModal,
+} from "@/components/restaurant/cashier/charge-modal";
+import { ReportPaymentModal } from "@/components/restaurant/waiter/report-payment-modal";
 import { OrderProgressBar, PlatesProgressList } from "./waiter-tables-panel";
 
 type Workspace = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.waiter.orderWorkspace>>>;
@@ -96,7 +106,6 @@ export function OrderPanel({
   const deliverReady = useMutation(api.waiter.deliverReadyItems);
   const markDelivered = useMutation(api.waiter.markAccountDelivered);
   const requestBill = useMutation(api.waiter.requestBill);
-  const confirmPayment = useMutation(api.waiter.confirmPayment);
   const reopenForOrdering = useMutation(api.waiter.reopenForOrdering);
   const voidEmptyAccount = useMutation(api.waiter.voidEmptyAccount);
   const moveAccountToTable = useMutation(api.waiter.moveAccountToTable);
@@ -126,7 +135,10 @@ export function OrderPanel({
   const [billWarningOpen, setBillWarningOpen] = useState(false);
   const [leaveDraftOpen, setLeaveDraftOpen] = useState(false);
   const [voidConfirmOpen, setVoidConfirmOpen] = useState(false);
-  const [payConfirmOpen, setPayConfirmOpen] = useState(false);
+  const [reportPaymentOpen, setReportPaymentOpen] = useState(false);
+  const [chargeModalOpen, setChargeModalOpen] = useState(false);
+  const [discountModalOpen, setDiscountModalOpen] = useState(false);
+  const [reopenModalOpen, setReopenModalOpen] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [busyItemId, setBusyItemId] = useState<Id<"orderItems"> | null>(null);
 
@@ -225,6 +237,8 @@ export function OrderPanel({
   const cancelledItems = allItems.filter((item) => item.status === "cancelled");
 
   const accountTotalCents = account?.totalCents ?? 0;
+  const accountGrossCents = accountTotalCents + (account?.discountCents ?? 0);
+  const accountBalanceCents = account?.balanceCents ?? accountTotalCents;
   const displayTaxCents = accountTotalCents - Math.round(accountTotalCents / 1.16);
   const displaySubtotalCents = accountTotalCents - displayTaxCents;
 
@@ -286,20 +300,6 @@ export function OrderPanel({
       showToast("Todo lo listo marcado como entregado");
     } catch (cause) {
       showToast(errorMessage(cause, "No pudimos marcarlo como entregado."), "err");
-    } finally {
-      setActionPending(false);
-    }
-  }
-
-  async function handleConfirmPayment() {
-    if (!account || actionPending) return;
-    setActionPending(true);
-    try {
-      await confirmPayment({ accountId: account._id });
-      setPayConfirmOpen(false);
-      router.push(returnHref);
-    } catch (cause) {
-      showToast(errorMessage(cause, "No pudimos confirmar el pago."), "err");
     } finally {
       setActionPending(false);
     }
@@ -531,7 +531,14 @@ export function OrderPanel({
             <div className="flex items-center justify-between gap-2">
               <h1 className="font-heading text-2xl font-extrabold tracking-tight">{accountTitle}</h1>
               {account ? (
-                account.state === "awaiting_payment" ? (
+                account.state === "closed" ? (
+                  <span className="az-badge success">
+                    <BadgeCheck aria-hidden="true" />
+                    Cobrada
+                  </span>
+                ) : account.state === "voided" ? (
+                  <span className="az-badge danger">Anulada</span>
+                ) : account.state === "awaiting_payment" ? (
                   <span className="az-badge warn">
                     <Receipt aria-hidden="true" />
                     Quiere pagar
@@ -565,7 +572,7 @@ export function OrderPanel({
             )}
           </div>
 
-          {account && account.plates.length > 0 ? (
+          {account && account.state !== "closed" && account.state !== "voided" && account.plates.length > 0 ? (
             <PlatesProgressList
               plates={account.plates}
               deliveredUnits={account.deliveredUnits}
@@ -579,27 +586,100 @@ export function OrderPanel({
               onDeliverAllReady={() => void handleDeliverAllReady()}
             />
           ) : (
-            account && account.progressStep >= 0 && <OrderProgressBar step={account.progressStep} />
+            account &&
+            account.state !== "closed" &&
+            account.state !== "voided" &&
+            account.progressStep >= 0 && <OrderProgressBar step={account.progressStep} />
           )}
 
-          {account?.state === "awaiting_payment" && data.canManageAccount && (
+          {account?.state === "awaiting_payment" && (data.canCharge || data.canManageAccount) && (
             <div className="az-notice warn">
               <Receipt className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
               <div className="flex-1 grid gap-2">
-                <span>
-                  Ya pidieron la cuenta. Cuando recibas el pago, confírmalo para cerrar la cuenta y liberar la mesa.
+                {data.canCharge ? (
+                  <>
+                    <span>
+                      {account.reportedPayment
+                        ? `${account.reportedPayment.reportedByName} reportó ${formatMoney(account.reportedPayment.receivedCents, data.currencyCode)} en ${PAYMENT_METHOD_LABELS[account.reportedPayment.method]}${account.reportedPayment.tipCents > 0 ? ` (+ ${formatMoney(account.reportedPayment.tipCents, data.currencyCode)} propina)` : ""}. Verifica el pago físico y confirma en Caja.`
+                        : "Ya pidieron la cuenta. Registra el cobro (efectivo, tarjeta, mixto o propina) para cerrar la cuenta y liberar la mesa."}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="site-button az-coral-cta w-fit"
+                      disabled={actionPending}
+                      onClick={() => setChargeModalOpen(true)}
+                    >
+                      <Wallet className="size-4" aria-hidden="true" />
+                      {account.reportedPayment
+                        ? "Revisar y confirmar cobro"
+                        : `Cobrar · ${formatMoney(accountBalanceCents, data.currencyCode)}`}
+                    </Button>
+                  </>
+                ) : account.reportedPayment ? (
+                  <>
+                    <span>
+                      Reportaste{" "}
+                      <strong>
+                        {formatMoney(account.reportedPayment.receivedCents, data.currencyCode)}
+                      </strong>{" "}
+                      en {PAYMENT_METHOD_LABELS[account.reportedPayment.method]}. Entrega el pago en
+                      Caja para que el cajero lo verifique y confirme el cierre de la cuenta.
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="w-fit"
+                      disabled={actionPending}
+                      onClick={() => setReportPaymentOpen(true)}
+                    >
+                      Actualizar reporte de pago
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      Ya pidieron la cuenta. Si el cliente te entrega el pago en mesa, repórtalo a
+                      Caja para que el cajero lo verifique y cierre la cuenta.
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="w-fit"
+                      disabled={actionPending}
+                      onClick={() => setReportPaymentOpen(true)}
+                    >
+                      <Receipt className="size-4" aria-hidden="true" />
+                      Reportar pago a caja · {formatMoney(accountBalanceCents, data.currencyCode)}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {account?.state === "closed" && (
+            <div className="az-notice ok">
+              <BadgeCheck className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
+              <div className="flex-1 grid gap-1">
+                <strong>Cuenta cobrada y cerrada</strong>
+                <span className="text-xs">
+                  {account.closedAt ? `Cerrada el ${formatDateTime(account.closedAt)}` : "Pago completado"}
                 </span>
+              </div>
+              {data.canReopenClosed && (
                 <Button
                   type="button"
-                  size="sm"
-                  className="site-button w-fit"
-                  disabled={actionPending}
-                  onClick={() => setPayConfirmOpen(true)}
+                  size="xs"
+                  variant="outline"
+                  onClick={() => setReopenModalOpen(true)}
                 >
-                  <BadgeCheck className="size-4" aria-hidden="true" />
-                  Confirmar pago · {formatMoney(accountTotalCents, data.currencyCode)}
+                  <RotateCcw className="size-3.5" aria-hidden="true" />
+                  Reabrir
                 </Button>
-              </div>
+              )}
             </div>
           )}
 
@@ -828,8 +908,63 @@ export function OrderPanel({
             </div>
           )}
 
+          {account && account.payments.length > 0 && (
+            <div className="grid gap-1">
+              <div className="az-section-kicker">Pagos registrados</div>
+              <div className="az-lines">
+                {account.payments.map((p) => (
+                  <div
+                    key={p._id}
+                    className={`az-line${p.status === "reverted" ? " opacity-60" : ""}`}
+                  >
+                    <div className="az-line-text">
+                      <span className="text-sm font-semibold">
+                        {PAYMENT_METHOD_LABELS[p.method]}
+                        {p.terminalFolio ? ` · Folio ${p.terminalFolio}` : ""}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {p.createdByName} · {formatDateTime(p.createdAt)}
+                        {p.tipCents > 0
+                          ? ` · Propina ${formatMoney(p.tipCents, data.currencyCode)}`
+                          : ""}
+                        {p.changeCents > 0
+                          ? ` · Cambio ${formatMoney(p.changeCents, data.currencyCode)}`
+                          : ""}
+                      </span>
+                      {p.status === "reverted" && (
+                        <span className="text-xs text-destructive">
+                          Revertido{p.revertReason ? `: ${p.revertReason}` : ""}
+                        </span>
+                      )}
+                    </div>
+                    <span
+                      className={`az-money text-sm${p.status === "reverted" ? " line-through text-muted-foreground" : ""}`}
+                    >
+                      {formatMoney(p.amountCents, data.currencyCode)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {account && (
             <div className="az-totals">
+              {account.discountCents > 0 && (
+                <>
+                  <div className="text-xs text-muted-foreground">
+                    <span>Consumo</span>
+                    <span>{formatMoney(accountGrossCents, data.currencyCode)}</span>
+                  </div>
+                  <div className="text-xs text-[#236a3a]">
+                    <span>
+                      Descuento
+                      {account.discountReason ? ` (${account.discountReason})` : ""}
+                    </span>
+                    <span>−{formatMoney(account.discountCents, data.currencyCode)}</span>
+                  </div>
+                </>
+              )}
               <div className="text-xs text-muted-foreground">
                 <span>Subtotal</span>
                 <span>{formatMoney(displaySubtotalCents, data.currencyCode)}</span>
@@ -842,43 +977,92 @@ export function OrderPanel({
                 <span>Total</span>
                 <span className="az-money">{formatMoney(accountTotalCents, data.currencyCode)}</span>
               </div>
+              {(account.paidCents > 0 || account.tipCents > 0) && (
+                <>
+                  <div className="text-xs text-muted-foreground">
+                    <span>Pagado</span>
+                    <span className="az-money">
+                      {formatMoney(account.paidCents, data.currencyCode)}
+                    </span>
+                  </div>
+                  {account.tipCents > 0 && (
+                    <div className="text-xs text-muted-foreground">
+                      <span>Propinas (aparte)</span>
+                      <span className="az-money">
+                        {formatMoney(account.tipCents, data.currencyCode)}
+                      </span>
+                    </div>
+                  )}
+                  {account.state !== "closed" && account.state !== "voided" && (
+                    <div className="font-bold text-[#9b6011]">
+                      <span>Falta por cobrar</span>
+                      <span className="az-money">
+                        {formatMoney(accountBalanceCents, data.currencyCode)}
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 
           <div className="grid gap-2">
             <div className="grid grid-cols-2 gap-2">
-              {account && account.state === "open" && sentItems.length > 0 && data.canManageAccount && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={actionPending}
-                  onClick={handleRequestBillClick}
-                >
-                  <Receipt className="size-4" aria-hidden="true" />
-                  Pedir la cuenta
-                </Button>
-              )}
-              {account && account.state === "awaiting_payment" && data.canManageAccount && (
-                <Button
-                  type="button"
-                  className="site-button"
-                  disabled={actionPending}
-                  onClick={() => setPayConfirmOpen(true)}
-                >
-                  <BadgeCheck className="size-4" aria-hidden="true" />
-                  Confirmar pago
-                </Button>
-              )}
-              {account && data.canManageAccount && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setMoreActionsOpen(true)}
-                >
-                  <MoreVertical className="size-4" aria-hidden="true" />
-                  Más acciones
-                </Button>
-              )}
+              {account &&
+                account.state === "open" &&
+                sentItems.length > 0 &&
+                data.canManageAccount && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={actionPending}
+                    onClick={handleRequestBillClick}
+                  >
+                    <Receipt className="size-4" aria-hidden="true" />
+                    Pedir la cuenta
+                  </Button>
+                )}
+              {account &&
+                (account.state === "open" || account.state === "awaiting_payment") &&
+                sentItems.length > 0 &&
+                data.canCharge && (
+                  <Button
+                    type="button"
+                    className="site-button az-coral-cta"
+                    disabled={actionPending}
+                    onClick={() => setChargeModalOpen(true)}
+                  >
+                    <Wallet className="size-4" aria-hidden="true" />
+                    Cobrar
+                  </Button>
+                )}
+              {account &&
+                account.state === "awaiting_payment" &&
+                !data.canCharge &&
+                data.canManageAccount && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={actionPending}
+                    onClick={() => setReportPaymentOpen(true)}
+                  >
+                    <Receipt className="size-4" aria-hidden="true" />
+                    {account.reportedPayment ? "Editar reporte" : "Reportar pago"}
+                  </Button>
+                )}
+              {account &&
+                account.state !== "closed" &&
+                account.state !== "voided" &&
+                (data.canManageAccount || data.canCharge) && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setMoreActionsOpen(true)}
+                  >
+                    <MoreVertical className="size-4" aria-hidden="true" />
+                    Más acciones
+                  </Button>
+                )}
             </div>
             {data.canTakeOrder && (
               <Button
@@ -984,7 +1168,7 @@ export function OrderPanel({
       {moreActionsOpen && account && (
         <AdminModal title="Más acciones" onClose={() => setMoreActionsOpen(false)}>
           <div className="grid gap-2">
-            {account.state === "open" && sentItems.length > 0 && (
+            {data.canCharge && sentItems.length > 0 && (
               <Button
                 type="button"
                 variant="outline"
@@ -992,14 +1176,29 @@ export function OrderPanel({
                 disabled={actionPending}
                 onClick={() => {
                   setMoreActionsOpen(false);
-                  setPayConfirmOpen(true);
+                  setDiscountModalOpen(true);
                 }}
               >
-                <BadgeCheck className="size-4" aria-hidden="true" />
-                Confirmar pago directo
+                <Percent className="size-4" aria-hidden="true" />
+                {account.discountCents > 0 ? "Editar o quitar descuento" : "Aplicar descuento o cortesía"}
               </Button>
             )}
-            {account.hasUndelivered && (
+            {account.state === "open" && sentItems.length > 0 && !data.canCharge && data.canManageAccount && (
+              <Button
+                type="button"
+                variant="outline"
+                className="justify-start"
+                disabled={actionPending}
+                onClick={() => {
+                  setMoreActionsOpen(false);
+                  setReportPaymentOpen(true);
+                }}
+              >
+                <Receipt className="size-4" aria-hidden="true" />
+                Reportar pago a caja
+              </Button>
+            )}
+            {account.hasUndelivered && data.canManageAccount && (
               <Button
                 type="button"
                 variant="outline"
@@ -1011,7 +1210,7 @@ export function OrderPanel({
                 Marcar todo como entregado
               </Button>
             )}
-            {account.kind === "dine_in" && data.freeTables.length > 0 && (
+            {account.kind === "dine_in" && data.freeTables.length > 0 && data.canManageAccount && (
               <Button
                 type="button"
                 variant="outline"
@@ -1025,7 +1224,7 @@ export function OrderPanel({
                 Mover a otra mesa
               </Button>
             )}
-            {data.activeWaiters.length > 0 && (
+            {data.activeWaiters.length > 0 && data.canManageAccount && (
               <Button
                 type="button"
                 variant="outline"
@@ -1039,7 +1238,7 @@ export function OrderPanel({
                 Reasignar mesero
               </Button>
             )}
-            {account.state === "awaiting_payment" && (
+            {account.state === "awaiting_payment" && data.canManageAccount && (
               <Button
                 type="button"
                 variant="outline"
@@ -1051,7 +1250,7 @@ export function OrderPanel({
                 Volver a tomar orden
               </Button>
             )}
-            {account.state === "open" && sentItems.length === 0 && (
+            {account.state === "open" && sentItems.length === 0 && data.canManageAccount && (
               <Button
                 type="button"
                 variant="destructive"
@@ -1172,14 +1371,71 @@ export function OrderPanel({
         </AdminModal>
       )}
 
-      {payConfirmOpen && account && (
-        <ConfirmModal
-          title={`Confirmar pago de ${accountTitle}`}
-          message={`Folio A-${String(account.folio).padStart(4, "0")} por ${formatMoney(accountTotalCents, data.currencyCode)}. Al confirmar, la cuenta se cerrará${data.table ? " y la mesa volverá a estar libre" : ""}.`}
-          confirmLabel="Sí, confirmar pago"
-          pending={actionPending}
-          onConfirm={() => void handleConfirmPayment()}
-          onClose={() => setPayConfirmOpen(false)}
+      {reportPaymentOpen && account && (
+        <ReportPaymentModal
+          target={{
+            accountId: account._id,
+            folio: account.folio,
+            label: accountTitle,
+            balanceCents: account.balanceCents,
+            existingReport: account.reportedPayment,
+          }}
+          currencyCode={data.currencyCode}
+          onClose={() => setReportPaymentOpen(false)}
+          onReported={(msg) => {
+            setReportPaymentOpen(false);
+            showToast(msg);
+          }}
+        />
+      )}
+
+      {chargeModalOpen && account && (
+        <ChargeModal
+          target={{
+            accountId: account._id,
+            folio: account.folio,
+            label: accountTitle,
+            totalCents: account.totalCents,
+            discountCents: account.discountCents,
+            paidCents: account.paidCents,
+            balanceCents: account.balanceCents,
+            reportedPayment: account.reportedPayment,
+          }}
+          currencyCode={data.currencyCode}
+          hasOpenShift={data.hasOpenShift}
+          onClose={() => setChargeModalOpen(false)}
+          onCompleted={({ closed }) => {
+            showToast(closed ? "Cuenta cobrada y cerrada" : "Abono registrado");
+          }}
+        />
+      )}
+
+      {discountModalOpen && account && (
+        <DiscountModal
+          accountId={account._id}
+          grossCents={accountGrossCents}
+          currentKind={account.discountKind}
+          currentValue={account.discountValue}
+          currentReason={account.discountReason}
+          currencyCode={data.currencyCode}
+          onClose={() => setDiscountModalOpen(false)}
+          onApplied={(msg) => {
+            setDiscountModalOpen(false);
+            showToast(msg);
+          }}
+        />
+      )}
+
+      {reopenModalOpen && account && (
+        <ReopenAccountModal
+          accountId={account._id}
+          folio={account.folio}
+          label={accountTitle}
+          onClose={() => setReopenModalOpen(false)}
+          onReopened={(msg) => {
+            setReopenModalOpen(false);
+            showToast(msg);
+          }}
         />
       )}
 

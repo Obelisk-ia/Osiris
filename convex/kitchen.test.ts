@@ -226,12 +226,12 @@ describe("station-split preparation, shared dishes, negative inventory, and part
     expect(waiterSnap.busyTables[0].status).toBe("occupied");
     expect(waiterSnap.busyTables[0].hasUndelivered).toBe(false);
 
-    // 6) Request bill -> "payment", then waiter confirms payment -> table resets to "empty" (Libre)!
+    // 6) Request bill -> "payment", then owner/caja confirms payment -> table resets to "empty" (Libre)!
     await waiter.mutation(api.waiter.requestBill, { accountId: order.accountId });
     floorSnap = await owner.query(api.floor.snapshot);
     expect(floorSnap.tables.find((tb) => tb._id === tableId)?.status).toBe("payment");
 
-    const paid = await waiter.mutation(api.waiter.confirmPayment, { accountId: order.accountId });
+    const paid = await owner.mutation(api.waiter.confirmPayment, { accountId: order.accountId });
     expect(paid.totalCents).toBe(19000 + 2 * 13500 + 6500);
     floorSnap = await owner.query(api.floor.snapshot);
     expect(floorSnap.tables.find((tb) => tb._id === tableId)?.status).toBe("empty");
@@ -371,8 +371,8 @@ describe("station-split preparation, shared dishes, negative inventory, and part
     expect((await chef.query(api.kitchen.snapshot)).tickets).toHaveLength(0);
     expect((await barStaff.query(api.kitchen.snapshot)).tickets).toHaveLength(0);
 
-    // Waiter confirms payment directly -> table resets to "empty"
-    await waiter.mutation(api.waiter.confirmPayment, { accountId: order.accountId });
+    // Owner/caja confirms payment -> table resets to "empty"
+    await owner.mutation(api.waiter.confirmPayment, { accountId: order.accountId });
     floorSnap = await owner.query(api.floor.snapshot);
     expect(floorSnap.tables.find((tb) => tb._id === tableId)?.status).toBe("empty");
   });
@@ -518,7 +518,7 @@ describe("station-split preparation, shared dishes, negative inventory, and part
       accountId: takeoutId,
       items: [{ dishId: soupId, quantity: 1, modifierOptionIds: [] }],
     });
-    await waiterA.mutation(api.waiter.confirmPayment, { accountId: takeoutId });
+    await owner.mutation(api.waiter.confirmPayment, { accountId: takeoutId });
     const takeoutSnap = await waiterA.query(api.waiter.takeoutSnapshot);
     const paidTakeout = takeoutSnap.accounts.find((a) => a._id === takeoutId);
     expect(paidTakeout).toMatchObject({

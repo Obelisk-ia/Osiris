@@ -2,6 +2,15 @@ import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
+import {
+  closeAccountAndFreeTable,
+  findOpenShift,
+  formatFolio,
+  hydrateReportedPayment,
+  loadAccountPaymentTotals,
+  PAYMENT_METHOD_LABELS,
+  recalculateAccountTotals,
+} from "./model/billing";
 import { reconcileCancelledRecipe } from "./model/inventory";
 import { emitNotification } from "./model/notifications";
 import {
@@ -16,7 +25,17 @@ import {
   syncOrderAndAccountTable,
   syncOrderItemStatus,
 } from "./model/orders";
-import { accountState, orderStatus, preparationArea, preparationStatus, tableStatus } from "./model/validators";
+import {
+  accountState,
+  discountKind,
+  orderStatus,
+  paymentMethod,
+  paymentStatus,
+  preparationArea,
+  preparationStatus,
+  reportedPaymentView,
+  tableStatus,
+} from "./model/validators";
 import {
   PREPARATION_AREAS,
   PREPARATION_AREA_META,
@@ -24,6 +43,7 @@ import {
 } from "../lib/restaurant-roles";
 
 const SERVICE_ROLES = ["waiter", "owner", "manager"] as const;
+const SERVICE_OR_CASHIER_ROLES = ["waiter", "owner", "manager", "cashier"] as const;
 const ALL_AREAS = PREPARATION_AREAS;
 const AREA_META = PREPARATION_AREA_META;
 
@@ -39,8 +59,16 @@ async function serviceStaff(ctx: QueryCtx | MutationCtx) {
   return await requireStaff(ctx, undefined, undefined, SERVICE_ROLES);
 }
 
+async function serviceOrCashierStaff(ctx: QueryCtx | MutationCtx) {
+  return await requireStaff(ctx, undefined, undefined, SERVICE_OR_CASHIER_ROLES);
+}
+
 function isManagerOrOwner(staff: Doc<"staff">) {
   return staff.roles.includes("owner") || staff.roles.includes("manager");
+}
+
+function isCashierOrAdmin(staff: Doc<"staff">) {
+  return isManagerOrOwner(staff) || staff.roles.includes("cashier");
 }
 
 function resolveDishAreas(dish: Doc<"dishes">): PreparationArea[] {
@@ -432,12 +460,8 @@ function summarizeAccount(items: Awaited<ReturnType<typeof loadAccountItems>>, s
 }
 
 async function recalculateAccountTotal(ctx: MutationCtx, accountId: Id<"accounts">): Promise<number> {
-  const items = await loadAccountItems(ctx, accountId);
-  const totalCents = items
-    .filter((item) => item.status !== "cancelled")
-    .reduce((sum, item) => sum + item.lineTotalCents, 0);
-  await ctx.db.patch("accounts", accountId, { totalCents, updatedAt: Date.now() });
-  return totalCents;
+  const updated = await recalculateAccountTotals(ctx, accountId);
+  return updated.totalCents;
 }
 
 async function assertTableVisibleToStaff(
@@ -445,7 +469,7 @@ async function assertTableVisibleToStaff(
   staff: Doc<"staff">,
   table: Doc<"diningTables">,
 ) {
-  if (isManagerOrOwner(staff)) return;
+  if (isCashierOrAdmin(staff)) return;
   const assignee = await activeSectionAssignee(ctx, table.sectionId);
   if (table.currentAccountId) {
     const acc = await ctx.db.get("accounts", table.currentAccountId);
@@ -526,6 +550,8 @@ const busyTableValidator = v.object({
   accountState,
   openedAt: v.number(),
   totalCents: v.number(),
+  balanceCents: v.number(),
+  reportedPayment: v.union(reportedPaymentView, v.null()),
   status: v.union(v.literal("occupied"), v.literal("partial"), v.literal("ready"), v.literal("payment")),
   progressStep: v.number(),
   itemCount: v.number(),
@@ -597,6 +623,8 @@ export const tablesSnapshot = query({
       accountState: Doc<"accounts">["state"];
       openedAt: number;
       totalCents: number;
+      balanceCents: number;
+      reportedPayment: ReturnType<typeof hydrateReportedPayment>;
       status: "occupied" | "partial" | "ready" | "payment";
       progressStep: number;
       itemCount: number;
@@ -642,7 +670,10 @@ export const tablesSnapshot = query({
           activeAccount.assignedStaffId !== staff._id;
         if (ownedByOther) continue;
 
-        const items = await loadAccountItems(ctx, activeAccount._id);
+        const [items, payTotals] = await Promise.all([
+          loadAccountItems(ctx, activeAccount._id),
+          loadAccountPaymentTotals(ctx, activeAccount._id),
+        ]);
         const summary = summarizeAccount(items, activeAccount.state);
         busyTables.push({
           tableId: table._id,
@@ -654,6 +685,8 @@ export const tablesSnapshot = query({
           accountState: activeAccount.state,
           openedAt: activeAccount._creationTime,
           totalCents: activeAccount.totalCents,
+          balanceCents: Math.max(0, activeAccount.totalCents - payTotals.paidCents),
+          reportedPayment: hydrateReportedPayment(activeAccount, staffNames),
           status: summary.tableStatus,
           progressStep: summary.progressStep,
           itemCount: summary.totalUnits,
@@ -738,6 +771,20 @@ const orderItemView = v.object({
   ),
 });
 
+const paymentViewValidator = v.object({
+  _id: v.id("payments"),
+  method: paymentMethod,
+  amountCents: v.number(),
+  tipCents: v.number(),
+  receivedCents: v.number(),
+  changeCents: v.number(),
+  terminalFolio: v.union(v.string(), v.null()),
+  status: paymentStatus,
+  createdAt: v.number(),
+  createdByName: v.string(),
+  revertReason: v.union(v.string(), v.null()),
+});
+
 export const orderWorkspace = query({
   args: {
     tableId: v.optional(v.id("diningTables")),
@@ -749,6 +796,9 @@ export const orderWorkspace = query({
     currencyCode: v.string(),
     canTakeOrder: v.boolean(),
     canManageAccount: v.boolean(),
+    canCharge: v.boolean(),
+    canReopenClosed: v.boolean(),
+    hasOpenShift: v.boolean(),
     table: v.union(
       v.null(),
       v.object({
@@ -766,7 +816,16 @@ export const orderWorkspace = query({
         kind: v.union(v.literal("dine_in"), v.literal("counter"), v.literal("takeaway"), v.literal("pickup")),
         state: accountState,
         openedAt: v.number(),
+        closedAt: v.union(v.number(), v.null()),
         totalCents: v.number(),
+        discountKind: v.union(discountKind, v.null()),
+        discountValue: v.union(v.number(), v.null()),
+        discountCents: v.number(),
+        discountReason: v.union(v.string(), v.null()),
+        paidCents: v.number(),
+        tipCents: v.number(),
+        balanceCents: v.number(),
+        reportedPayment: v.union(reportedPaymentView, v.null()),
         assignedStaffId: v.union(v.id("staff"), v.null()),
         assignedStaffName: v.union(v.string(), v.null()),
         customerName: v.union(v.string(), v.null()),
@@ -782,6 +841,7 @@ export const orderWorkspace = query({
         plates: v.array(plateSummaryValidator),
         stationSections: v.array(stationSectionValidator),
         items: v.array(orderItemView),
+        payments: v.array(paymentViewValidator),
       }),
     ),
     freeTables: v.array(
@@ -828,10 +888,11 @@ export const orderWorkspace = query({
     ),
   }),
   handler: async (ctx, args) => {
-    const staff = await serviceStaff(ctx);
-    const [restaurant, location] = await Promise.all([
+    const staff = await serviceOrCashierStaff(ctx);
+    const [restaurant, location, openShift] = await Promise.all([
       ctx.db.get("organizations", staff.organizationId),
       ctx.db.get("locations", staff.locationId),
+      findOpenShift(ctx, staff.locationId),
     ]);
 
     let table: Doc<"diningTables"> | null = null;
@@ -870,13 +931,25 @@ export const orderWorkspace = query({
       : null;
 
     const isWaiter = staff.roles.includes("waiter");
+    const isCashier = staff.roles.includes("cashier");
     const ownsAccount =
       !account || !account.assignedStaffId || account.assignedStaffId === staff._id;
-    const canManageAccount = (isWaiter && ownsAccount) || isManagerOrOwner(staff);
+    const isTakeoutAccount = Boolean(account && account.kind !== "dine_in");
+    const canManageAccount =
+      (isWaiter && ownsAccount) ||
+      isManagerOrOwner(staff) ||
+      (isCashier && isTakeoutAccount);
     const canTakeOrder =
       canManageAccount && (!account || account.state === "open");
+    const canCharge = isCashierOrAdmin(staff);
+    const canReopenClosed = isManagerOrOwner(staff);
 
-    const accountItems = account ? await loadAccountItems(ctx, account._id) : [];
+    const [accountItems, paymentTotals] = account
+      ? await Promise.all([
+          loadAccountItems(ctx, account._id),
+          loadAccountPaymentTotals(ctx, account._id),
+        ])
+      : [[], null];
     const summary = account ? summarizeAccount(accountItems, account.state) : null;
 
     // Load live shared menu
@@ -1003,12 +1076,32 @@ export const orderWorkspace = query({
       });
     }
 
+    const staffNameMap = new Map(locationStaff.map((member) => [member._id, member.displayName] as const));
+    const paymentViews = (paymentTotals?.payments ?? [])
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((p) => ({
+        _id: p._id,
+        method: p.method,
+        amountCents: p.amountCents,
+        tipCents: p.tipCents,
+        receivedCents: p.receivedCents,
+        changeCents: p.changeCents,
+        terminalFolio: p.terminalFolio ?? null,
+        status: p.status,
+        createdAt: p.createdAt,
+        createdByName: staffNameMap.get(p.createdByStaffId) ?? "Caja",
+        revertReason: p.revertReason ?? null,
+      }));
+
     return {
       restaurantName: restaurant?.name ?? "Tu restaurante",
       locationName: location?.name ?? "Sucursal principal",
       currencyCode: restaurant?.currencyCode ?? "MXN",
       canTakeOrder,
       canManageAccount,
+      canCharge,
+      canReopenClosed,
+      hasOpenShift: openShift !== null,
       table: table
         ? {
             _id: table._id,
@@ -1024,7 +1117,16 @@ export const orderWorkspace = query({
             kind: account.kind,
             state: account.state,
             openedAt: account._creationTime,
+            closedAt: account.closedAt ?? null,
             totalCents: account.totalCents,
+            discountKind: account.discountKind ?? null,
+            discountValue: account.discountValue ?? null,
+            discountCents: account.discountCents ?? 0,
+            discountReason: account.discountReason ?? null,
+            paidCents: paymentTotals?.paidCents ?? 0,
+            tipCents: paymentTotals?.tipCents ?? 0,
+            balanceCents: Math.max(0, account.totalCents - (paymentTotals?.paidCents ?? 0)),
+            reportedPayment: hydrateReportedPayment(account, staffNameMap),
             assignedStaffId: account.assignedStaffId ?? null,
             assignedStaffName: assignedStaffDoc?.displayName ?? null,
             customerName: account.customerName ?? null,
@@ -1040,6 +1142,7 @@ export const orderWorkspace = query({
             plates: summary.plates,
             stationSections: summary.stationSections,
             items: accountItems,
+            payments: paymentViews,
           }
         : null,
       freeTables,
@@ -1057,6 +1160,8 @@ export const takeoutSnapshot = query({
     restaurantName: v.string(),
     locationName: v.string(),
     currencyCode: v.string(),
+    canCharge: v.boolean(),
+    hasOpenShift: v.boolean(),
     accounts: v.array(
       v.object({
         _id: v.id("accounts"),
@@ -1068,6 +1173,10 @@ export const takeoutSnapshot = query({
         customerPhone: v.union(v.string(), v.null()),
         promisedAt: v.union(v.number(), v.null()),
         totalCents: v.number(),
+        discountCents: v.number(),
+        paidCents: v.number(),
+        balanceCents: v.number(),
+        reportedPayment: v.union(reportedPaymentView, v.null()),
         openedAt: v.number(),
         itemsSummary: v.string(),
         hasItems: v.boolean(),
@@ -1080,28 +1189,35 @@ export const takeoutSnapshot = query({
     ),
   }),
   handler: async (ctx) => {
-    const staff = await serviceStaff(ctx);
-    const [restaurant, location, openAccounts, paymentAccounts, closedAccounts] = await Promise.all([
-      ctx.db.get("organizations", staff.organizationId),
-      ctx.db.get("locations", staff.locationId),
-      ctx.db
-        .query("accounts")
-        .withIndex("by_locationId_and_state", (q) => q.eq("locationId", staff.locationId).eq("state", "open"))
-        .order("desc")
-        .take(50),
-      ctx.db
-        .query("accounts")
-        .withIndex("by_locationId_and_state", (q) =>
-          q.eq("locationId", staff.locationId).eq("state", "awaiting_payment"),
-        )
-        .order("desc")
-        .take(50),
-      ctx.db
-        .query("accounts")
-        .withIndex("by_locationId_and_state", (q) => q.eq("locationId", staff.locationId).eq("state", "closed"))
-        .order("desc")
-        .take(40),
-    ]);
+    const staff = await serviceOrCashierStaff(ctx);
+    const [restaurant, location, openShift, staffRows, openAccounts, paymentAccounts, closedAccounts] =
+      await Promise.all([
+        ctx.db.get("organizations", staff.organizationId),
+        ctx.db.get("locations", staff.locationId),
+        findOpenShift(ctx, staff.locationId),
+        ctx.db
+          .query("staff")
+          .withIndex("by_locationId_and_isActive", (q) => q.eq("locationId", staff.locationId))
+          .take(100),
+        ctx.db
+          .query("accounts")
+          .withIndex("by_locationId_and_state", (q) => q.eq("locationId", staff.locationId).eq("state", "open"))
+          .order("desc")
+          .take(50),
+        ctx.db
+          .query("accounts")
+          .withIndex("by_locationId_and_state", (q) =>
+            q.eq("locationId", staff.locationId).eq("state", "awaiting_payment"),
+          )
+          .order("desc")
+          .take(50),
+        ctx.db
+          .query("accounts")
+          .withIndex("by_locationId_and_state", (q) => q.eq("locationId", staff.locationId).eq("state", "closed"))
+          .order("desc")
+          .take(40),
+      ]);
+    const staffNames = new Map(staffRows.map((s) => [s._id, s.displayName] as const));
 
     // Show today's paid takeout orders in the Entregado column (last 18 hours window).
     const todayCutoff = Date.now() - 18 * 60 * 60 * 1000;
@@ -1109,16 +1225,19 @@ export const takeoutSnapshot = query({
       (acc) => acc.kind !== "dine_in" && (acc.closedAt ?? acc.updatedAt) >= todayCutoff,
     );
 
-    const admin = isManagerOrOwner(staff);
+    const adminOrCashier = isCashierOrAdmin(staff);
     const relevant = [...openAccounts, ...paymentAccounts, ...recentClosed].filter((acc) => {
       if (acc.kind === "dine_in") return false;
-      if (!admin && acc.assignedStaffId && acc.assignedStaffId !== staff._id) return false;
+      if (!adminOrCashier && acc.assignedStaffId && acc.assignedStaffId !== staff._id) return false;
       return true;
     });
 
     const accounts = await Promise.all(
       relevant.map(async (acc) => {
-        const items = await loadAccountItems(ctx, acc._id);
+        const [items, payTotals] = await Promise.all([
+          loadAccountItems(ctx, acc._id),
+          loadAccountPaymentTotals(ctx, acc._id),
+        ]);
         const activeItems = items.filter((i) => i.status !== "cancelled");
         const summary = summarizeAccount(items, acc.state);
         const isPaid = acc.state === "closed";
@@ -1140,6 +1259,10 @@ export const takeoutSnapshot = query({
           customerPhone: acc.customerPhone ?? null,
           promisedAt: acc.promisedAt ?? null,
           totalCents: acc.totalCents,
+          discountCents: acc.discountCents ?? 0,
+          paidCents: payTotals.paidCents,
+          balanceCents: Math.max(0, acc.totalCents - payTotals.paidCents),
+          reportedPayment: hydrateReportedPayment(acc, staffNames),
           openedAt: acc._creationTime,
           itemsSummary: activeItems.map((i) => `${i.quantity} × ${i.dishName}`).join(", "),
           hasItems: activeItems.length > 0,
@@ -1156,6 +1279,8 @@ export const takeoutSnapshot = query({
       restaurantName: restaurant?.name ?? "Tu restaurante",
       locationName: location?.name ?? "Sucursal principal",
       currencyCode: restaurant?.currencyCode ?? "MXN",
+      canCharge: isCashierOrAdmin(staff),
+      hasOpenShift: openShift !== null,
       accounts,
     };
   },
@@ -1180,13 +1305,17 @@ export const submitOrder = mutation({
     stationNames: v.array(v.string()),
   }),
   handler: async (ctx, args) => {
-    const staff = await serviceStaff(ctx);
+    const staff = await serviceOrCashierStaff(ctx);
     if (args.items.length < 1 || args.items.length > 50) {
       throw new ConvexError("Agrega entre 1 y 50 productos a la orden.");
     }
 
     const location = await ctx.db.get("locations", staff.locationId);
     const autoSoldOut = location?.autoSoldOut ?? true;
+    const isPureCashier =
+      staff.roles.includes("cashier") &&
+      !staff.roles.includes("waiter") &&
+      !isManagerOrOwner(staff);
 
     let account: Doc<"accounts"> | null = null;
     let table: Doc<"diningTables"> | null = null;
@@ -1199,7 +1328,10 @@ export const submitOrder = mutation({
       if (found.state !== "open") {
         throw new ConvexError("Esta cuenta no admite nuevos pedidos en su estado actual.");
       }
-      if (!isManagerOrOwner(staff) && found.assignedStaffId && found.assignedStaffId !== staff._id) {
+      if (isPureCashier && found.kind === "dine_in") {
+        throw new ConvexError("Solo meseros, gerente o dueño pueden tomar órdenes en mesa.");
+      }
+      if (!isCashierOrAdmin(staff) && found.assignedStaffId && found.assignedStaffId !== staff._id) {
         throw new ConvexError("Esta cuenta la atiende otro mesero.");
       }
       account = found;
@@ -1207,6 +1339,9 @@ export const submitOrder = mutation({
         table = await ctx.db.get("diningTables", found.diningTableId);
       }
     } else if (args.tableId) {
+      if (isPureCashier) {
+        throw new ConvexError("Solo meseros, gerente o dueño pueden abrir órdenes en mesa.");
+      }
       const found = await ctx.db.get("diningTables", args.tableId);
       if (!found || !found.isActive || found.locationId !== staff.locationId) {
         throw new ConvexError("No encontramos esa mesa.");
@@ -1677,7 +1812,7 @@ export const deliverReadyItems = mutation({
     tableStatus: v.union(tableStatus, v.null()),
   }),
   handler: async (ctx, args) => {
-    const staff = await serviceStaff(ctx);
+    const staff = await serviceOrCashierStaff(ctx);
     const account = await ctx.db.get("accounts", args.accountId);
     if (!account || account.locationId !== staff.locationId) {
       throw new ConvexError("No encontramos esta cuenta.");
@@ -1685,7 +1820,14 @@ export const deliverReadyItems = mutation({
     if (account.state === "closed" || account.state === "voided") {
       throw new ConvexError("Esta cuenta ya terminó.");
     }
-    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+    const isPureCashier =
+      staff.roles.includes("cashier") &&
+      !staff.roles.includes("waiter") &&
+      !isManagerOrOwner(staff);
+    if (isPureCashier && account.kind === "dine_in") {
+      throw new ConvexError("Solo meseros, gerente o dueño pueden marcar entregas en mesa.");
+    }
+    if (!isCashierOrAdmin(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
       throw new ConvexError("Esta cuenta la atiende otro mesero.");
     }
 
@@ -1981,11 +2123,18 @@ export const reassignAccountWaiter = mutation({
   },
 });
 
-export const confirmPayment = mutation({
-  args: { accountId: v.id("accounts") },
+export const reportPayment = mutation({
+  args: {
+    accountId: v.id("accounts"),
+    method: paymentMethod,
+    receivedCents: v.number(),
+    tipCents: v.optional(v.number()),
+    terminalFolio: v.optional(v.string()),
+    note: v.optional(v.string()),
+  },
   returns: v.object({
     folio: v.number(),
-    totalCents: v.number(),
+    balanceCents: v.number(),
   }),
   handler: async (ctx, args) => {
     const staff = await serviceStaff(ctx);
@@ -2000,29 +2149,132 @@ export const confirmPayment = mutation({
       throw new ConvexError("Esta cuenta la atiende otro mesero.");
     }
 
-    const items = await loadAccountItems(ctx, account._id);
+    const [items, payTotals] = await Promise.all([
+      loadAccountItems(ctx, account._id),
+      loadAccountPaymentTotals(ctx, account._id),
+    ]);
+    const activeItems = items.filter((i) => i.status !== "cancelled");
+    if (activeItems.length === 0) {
+      throw new ConvexError("Esta cuenta no tiene productos para reportar pago.");
+    }
+
+    const balanceCents = Math.max(0, account.totalCents - payTotals.paidCents);
+    const receivedCents = safeInteger(args.receivedCents, "Monto recibido", 1);
+    if (receivedCents > 50_000_000) {
+      throw new ConvexError("El monto recibido excede el límite permitido.");
+    }
+    const tipCents = safeInteger(args.tipCents ?? 0, "Propina", 0);
+    if (tipCents > 50_000_000) {
+      throw new ConvexError("La propina excede el límite permitido.");
+    }
+    if (receivedCents < tipCents) {
+      throw new ConvexError("El monto recibido no alcanza para cubrir la propina indicada.");
+    }
+    if (args.method !== "efectivo" && receivedCents > balanceCents + tipCents) {
+      throw new ConvexError(
+        "El monto en tarjeta, transferencia o vales no puede superar el saldo más la propina.",
+      );
+    }
+
+    const terminalFolio =
+      args.method === "tarjeta" ? args.terminalFolio?.trim().slice(0, 40) || undefined : undefined;
+    const note = args.note?.trim().slice(0, 160) || undefined;
+    const now = Date.now();
+
+    await ctx.db.patch("accounts", account._id, {
+      state: "awaiting_payment",
+      billRequestedAt: account.billRequestedAt ?? now,
+      reportedPayment: {
+        method: args.method,
+        receivedCents,
+        tipCents,
+        terminalFolio,
+        note,
+        reportedByStaffId: staff._id,
+        reportedAt: now,
+      },
+      updatedAt: now,
+    });
+    if (account.diningTableId) {
+      await ctx.db.patch("diningTables", account.diningTableId, { status: "payment" });
+    }
+
+    const table = account.diningTableId ? await ctx.db.get("diningTables", account.diningTableId) : null;
+    const label = table?.tableNumber ?? account.customerName ?? formatFolio(account.folio);
+    const moneyText = (receivedCents / 100).toLocaleString("es-MX", {
+      style: "currency",
+      currency: "MXN",
+    });
+    const tipText =
+      tipCents > 0
+        ? ` (propina ${(tipCents / 100).toLocaleString("es-MX", { style: "currency", currency: "MXN" })})`
+        : "";
+    await emitNotification(ctx, {
+      organizationId: staff.organizationId,
+      locationId: staff.locationId,
+      kind: "bill",
+      title: `Pago reportado: ${label}`,
+      body: `${staff.displayName} reportó ${moneyText} en ${PAYMENT_METHOD_LABELS[args.method]}${tipText}. Verifica y confirma en Caja.`,
+      targetRoles: ["cashier", "owner", "manager"],
+      accountId: account._id,
+      href: "/cuenta/caja",
+      actionLabel: "Confirmar en caja",
+    });
+
+    return { folio: account.folio, balanceCents };
+  },
+});
+
+export const confirmPayment = mutation({
+  args: { accountId: v.id("accounts") },
+  returns: v.object({
+    folio: v.number(),
+    totalCents: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await requireStaff(ctx, undefined, undefined, ["cashier", "owner", "manager"]);
+    const account = await ctx.db.get("accounts", args.accountId);
+    if (!account || account.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esta cuenta.");
+    }
+    if (account.state === "closed" || account.state === "voided") {
+      throw new ConvexError("Esta cuenta ya está cerrada.");
+    }
+
+    const [items, payTotals, activeShift] = await Promise.all([
+      loadAccountItems(ctx, account._id),
+      loadAccountPaymentTotals(ctx, account._id),
+      findOpenShift(ctx, staff.locationId),
+    ]);
     const activeItems = items.filter((i) => i.status !== "cancelled");
     if (activeItems.length === 0) {
       throw new ConvexError("Esta cuenta no tiene productos para cobrar. Puedes anularla desde Más acciones.");
     }
 
     const now = Date.now();
-    await ctx.db.patch("accounts", account._id, {
-      state: "closed",
-      closedAt: now,
-      updatedAt: now,
-    });
-
-    if (account.diningTableId) {
-      const table = await ctx.db.get("diningTables", account.diningTableId);
-      if (table && table.currentAccountId === account._id) {
-        await ctx.db.patch("diningTables", table._id, {
-          currentAccountId: undefined,
-          assignedStaffId: undefined,
-          status: "empty",
-        });
-      }
+    const balanceCents = Math.max(0, account.totalCents - payTotals.paidCents);
+    if (balanceCents > 0) {
+      await ctx.db.insert("payments", {
+        organizationId: staff.organizationId,
+        locationId: staff.locationId,
+        accountId: account._id,
+        shiftId: activeShift?._id,
+        method: "efectivo",
+        amountCents: balanceCents,
+        tipCents: 0,
+        receivedCents: balanceCents,
+        changeCents: 0,
+        status: "confirmed",
+        createdByStaffId: staff._id,
+        createdAt: now,
+      });
     }
+
+    await ctx.db.patch("accounts", account._id, {
+      paidCents: payTotals.paidCents + balanceCents,
+      tipCents: payTotals.tipCents,
+    });
+    await closeAccountAndFreeTable(ctx, account, staff, now);
 
     return { folio: account.folio, totalCents: account.totalCents };
   },
@@ -2093,6 +2345,7 @@ export const reopenForOrdering = mutation({
     await ctx.db.patch("accounts", account._id, {
       state: "open",
       billRequestedAt: undefined,
+      reportedPayment: undefined,
       updatedAt: now,
     });
     await syncAccountTableStatus(ctx, account._id, now);
@@ -2104,7 +2357,7 @@ export const voidEmptyAccount = mutation({
   args: { accountId: v.id("accounts") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await serviceStaff(ctx);
+    const staff = await serviceOrCashierStaff(ctx);
     const account = await ctx.db.get("accounts", args.accountId);
     if (!account || account.locationId !== staff.locationId) {
       throw new ConvexError("No encontramos esta cuenta.");
@@ -2112,7 +2365,14 @@ export const voidEmptyAccount = mutation({
     if (account.state !== "open") {
       throw new ConvexError("Solo se pueden anular cuentas abiertas.");
     }
-    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+    const isPureCashier =
+      staff.roles.includes("cashier") &&
+      !staff.roles.includes("waiter") &&
+      !isManagerOrOwner(staff);
+    if (isPureCashier && account.kind === "dine_in") {
+      throw new ConvexError("Solo meseros, gerente o dueño pueden anular cuentas en mesa.");
+    }
+    if (!isCashierOrAdmin(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
       throw new ConvexError("Esta cuenta la atiende otro mesero.");
     }
     const items = await loadAccountItems(ctx, account._id);
@@ -2198,7 +2458,7 @@ export const createTakeoutAccount = mutation({
   },
   returns: v.id("accounts"),
   handler: async (ctx, args) => {
-    const staff = await serviceStaff(ctx);
+    const staff = await serviceOrCashierStaff(ctx);
     const customerName = args.customerName?.trim().slice(0, 80) || undefined;
     const customerPhone = args.customerPhone?.trim().slice(0, 24) || undefined;
     if (args.kind !== "counter") {

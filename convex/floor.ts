@@ -69,7 +69,7 @@ export const snapshot = query({
     waiters: v.array(staffView),
   }),
   handler: async (ctx) => {
-    const staff = await requireStaff(ctx, undefined, undefined, ["owner", "manager", "waiter"]);
+    const staff = await requireStaff(ctx, undefined, undefined, ["owner", "manager", "waiter", "cashier"]);
     const [sections, types, tables, waiters] = await Promise.all([
       sectionsFor(ctx, staff.locationId),
       ctx.db.query("tableTypes").withIndex("by_locationId_and_name", (q) => q.eq("locationId", staff.locationId)).take(50),

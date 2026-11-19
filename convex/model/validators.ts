@@ -47,3 +47,30 @@ export const workspace = v.union(
 export const preparationArea = v.union(
   v.literal("kitchen"), v.literal("bar"), v.literal("cocktails"), v.literal("coffee"),
 );
+export const paymentMethod = v.union(
+  v.literal("efectivo"),
+  v.literal("tarjeta"),
+  v.literal("transferencia"),
+  v.literal("vales"),
+);
+export const paymentStatus = v.union(v.literal("confirmed"), v.literal("reverted"));
+export const cashMovementKind = v.union(v.literal("ingreso"), v.literal("retiro"));
+export const discountKind = v.union(v.literal("pct"), v.literal("amt"));
+export const reportedPayment = v.object({
+  method: paymentMethod,
+  receivedCents: v.number(),
+  tipCents: v.number(),
+  terminalFolio: v.optional(v.string()),
+  note: v.optional(v.string()),
+  reportedByStaffId: v.id("staff"),
+  reportedAt: v.number(),
+});
+export const reportedPaymentView = v.object({
+  method: paymentMethod,
+  receivedCents: v.number(),
+  tipCents: v.number(),
+  terminalFolio: v.union(v.string(), v.null()),
+  note: v.union(v.string(), v.null()),
+  reportedByName: v.string(),
+  reportedAt: v.number(),
+});

@@ -1,8 +1,19 @@
 "use client";
 
 import { useMutation, usePreloadedQuery, type Preloaded } from "convex/react";
-import { Check, Download, EyeOff, Printer, QrCode, RefreshCw } from "lucide-react";
+import {
+  BookOpen,
+  Check,
+  Copy,
+  Download,
+  ExternalLink,
+  EyeOff,
+  Printer,
+  QrCode,
+  RefreshCw,
+} from "lucide-react";
 import Link from "next/link";
+import QRCode from "qrcode";
 import { useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -13,51 +24,39 @@ import { AdminModal, AdminPageHead, ConfirmModal, EmptyState, ToastBanner, useTo
 type Snapshot = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.floor.snapshot>>>;
 type TableItem = Snapshot["tables"][number];
 
-function qrPathFor(seed: string): string {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  const rand = () => {
-    h ^= h << 13;
-    h ^= h >>> 17;
-    h ^= h << 5;
-    return (h >>> 0) / 4294967296;
-  };
-  const n = 29;
-  const inFinder = (x: number, y: number) =>
-    (x < 8 && y < 8) || (x >= n - 8 && y < 8) || (x < 8 && y >= n - 8);
-  let d = "";
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      if (!inFinder(x, y) && rand() > 0.5) {
-        d += `M${x + 2} ${y + 2}h1v1h-1z`;
+function buildQrSvgModel(url: string): { size: number; path: string } {
+  const qr = QRCode.create(url, { errorCorrectionLevel: "M" });
+  const modules = qr.modules;
+  const count = modules.size;
+  const margin = 2;
+  let path = "";
+  for (let y = 0; y < count; y++) {
+    for (let x = 0; x < count; x++) {
+      if (modules.get(x, y)) {
+        path += `M${x + margin} ${y + margin}h1v1h-1z`;
       }
     }
   }
-  for (const [ox, oy] of [
-    [0, 0],
-    [n - 7, 0],
-    [0, n - 7],
-  ]) {
-    const X = ox + 2;
-    const Y = oy + 2;
-    d += `M${X} ${Y}h7v7h-7zM${X + 1} ${Y + 1}v5h5v-5zM${X + 2} ${Y + 2}h3v3h-3z`;
-  }
-  return d;
+  return { size: count + margin * 2, path };
 }
 
-function qrSvgString(tableNumber: string, seed: string) {
-  const path = qrPathFor(seed);
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 33 33" role="img" aria-label="Código QR de ${tableNumber}" shape-rendering="crispEdges"><rect width="33" height="33" fill="#ffffff"/><path fill="#15140f" fill-rule="evenodd" d="${path}"/></svg>`;
+function buildQrSvgMarkup(label: string, url: string): string {
+  const { size, path } = buildQrSvgModel(url);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="Código QR de ${label}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="#ffffff"/><path fill="#15140f" d="${path}"/></svg>`;
+}
+
+function resolvePublicUrl(path: string): string {
+  if (typeof window === "undefined") return path;
+  return `${window.location.origin}${path}`;
 }
 
 export function QrPanel({
   preloaded,
+  locationId,
   locationName,
 }: {
   preloaded: Preloaded<typeof api.floor.snapshot>;
+  locationId: Id<"locations">;
   locationName: string;
 }) {
   const data = usePreloadedQuery(preloaded);
@@ -67,6 +66,7 @@ export function QrPanel({
   const setQrEnabled = useMutation(api.floor.setTableQrEnabled);
 
   const [selectedId, setSelectedId] = useState<Id<"diningTables"> | null>(null);
+  const [publicMenuModal, setPublicMenuModal] = useState(false);
   const [confirmRegen, setConfirmRegen] = useState<TableItem | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -77,32 +77,50 @@ export function QrPanel({
 
   const selectedTable = selectedId ? data.tables.find((t) => t._id === selectedId) ?? null : null;
 
-  function downloadSvg(table: TableItem) {
-    const seed = `${table._id}:${table.qrToken}`;
-    const svg = qrSvgString(table.tableNumber, seed);
+  const publicMenuPath = `/menu/${locationId}`;
+  const publicMenuUrl = resolvePublicUrl(publicMenuPath);
+
+  function tablePath(table: TableItem) {
+    return `/mesa/${table.qrToken}`;
+  }
+
+  function tableUrl(table: TableItem) {
+    return resolvePublicUrl(tablePath(table));
+  }
+
+  async function copyUrl(url: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast(`Enlace de ${label} copiado`);
+    } catch {
+      showToast("No pudimos copiar el enlace. Cópialo manualmente.", "err");
+    }
+  }
+
+  function downloadSvg(label: string, url: string, fileSlug: string) {
+    const svg = buildQrSvgMarkup(label, url);
     const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
+    const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `qr_${table.tableNumber.replace(/\s+/g, "_").toLowerCase()}.svg`;
+    a.href = blobUrl;
+    a.download = `qr_${fileSlug}.svg`;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
     showToast("Código QR descargado");
   }
 
-  function printQr(table: TableItem) {
-    const seed = `${table._id}:${table.qrToken}`;
-    const svg = qrSvgString(table.tableNumber, seed);
-    const win = window.open("", "_blank", "width=420,height=560");
+  function printQr(title: string, subtitle: string, url: string, footer: string) {
+    const svg = buildQrSvgMarkup(title, url);
+    const win = window.open("", "_blank", "width=440,height=600");
     if (!win) {
       showToast("Tu navegador bloqueó la ventana de impresión.", "err");
       return;
     }
     const doc = win.document;
     doc.open();
-    doc.write(`<!doctype html><html lang="es-MX"><head><meta charset="utf-8"><title>QR · ${table.tableNumber}</title><style>body{font-family:system-ui,sans-serif;text-align:center;padding:32px;color:#15140f}svg{width:240px;height:240px;margin:16px auto;display:block}h1{margin:0 0 4px;font-size:24px}p{margin:4px 0;color:#5a5448;font-size:14px}</style></head><body><h1>${data.restaurantName}</h1><p>${table.tableNumber} · Versión ${table.qrVersion ?? 1}</p>${svg}<p>Escanea para ver el menú y pedir</p></body></html>`);
+    doc.write(`<!doctype html><html lang="es-MX"><head><meta charset="utf-8"><title>QR · ${title}</title><style>body{font-family:system-ui,sans-serif;text-align:center;padding:32px;color:#15140f}svg{width:260px;height:260px;margin:18px auto;display:block}h1{margin:0 0 4px;font-size:24px}p{margin:4px 0;color:#5a5448;font-size:14px}.url{font-family:monospace;font-size:11px;word-break:break-all;margin-top:12px}</style></head><body><h1>${data.restaurantName}</h1><p>${subtitle}</p>${svg}<p>${footer}</p><p class="url">${url}</p></body></html>`);
     doc.close();
     win.focus();
     win.print();
@@ -122,15 +140,25 @@ export function QrPanel({
     }
   }
 
+  const publicQrModel = useMemo(
+    () => (publicMenuModal ? buildQrSvgModel(publicMenuUrl) : null),
+    [publicMenuModal, publicMenuUrl],
+  );
+  const selectedQrModel = useMemo(
+    () => (selectedTable ? buildQrSvgModel(tableUrl(selectedTable)) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedTable?._id, selectedTable?.qrToken],
+  );
+
   return (
     <div className="az-page">
       <AdminPageHead
-        index={5}
-        total={8}
+        index={6}
+        total={10}
         restaurantName={data.restaurantName}
         locationName={locationName}
         title="Códigos QR"
-        subtitle="Cada mesa tiene su propio código QR único. Las mesas se agregan y acomodan desde Mesas con Editar plano."
+        subtitle="Cada mesa tiene su propio código QR escaneable para consultar el menú, llamar al mesero y pedir la cuenta."
         actions={
           <Link
             href="/cuenta/mesas"
@@ -141,42 +169,98 @@ export function QrPanel({
         }
       />
 
+      <section className="az-card" aria-label="Carta pública sin mesa">
+        <div className="az-row-main">
+          <div className="az-row-text">
+            <div className="az-cluster">
+              <strong className="font-heading text-lg font-bold">Carta pública (sin mesa)</strong>
+              <span className="az-badge success">
+                <BookOpen aria-hidden="true" />
+                Siempre activa
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Menú de solo lectura para compartir en redes, Google Maps o colocar en la entrada del
+              restaurante.
+            </p>
+          </div>
+          <div className="az-row-actions">
+            <a
+              href={publicMenuPath}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-full border border-border px-3.5 py-2 text-xs font-semibold hover:border-foreground"
+            >
+              Abrir carta
+              <ExternalLink className="size-3.5" aria-hidden="true" />
+            </a>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void copyUrl(publicMenuUrl, "carta pública")}
+            >
+              <Copy className="size-3.5" aria-hidden="true" />
+              Copiar enlace
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => setPublicMenuModal(true)}>
+              <QrCode className="size-4" aria-hidden="true" />
+              Ver QR
+            </Button>
+          </div>
+        </div>
+      </section>
+
       {data.tables.length > 0 ? (
-        <ul className="az-rows">
-          {data.tables.map((table) => {
-            const sectionName = sectionNames.get(table.sectionId) ?? "Sección";
-            const version = table.qrVersion ?? 1;
-            return (
-              <li key={table._id}>
-                <div className="az-row-main">
-                  <div className="az-row-text">
-                    <div className="az-cluster">
-                      <strong>{table.tableNumber}</strong>
-                      {table.qrEnabled ? (
-                        <span className="az-badge success">
-                          <Check aria-hidden="true" />
-                          Activo
-                        </span>
-                      ) : (
-                        <span className="az-badge">
-                          <EyeOff aria-hidden="true" />
-                          Pausado
-                        </span>
-                      )}
+        <section className="grid gap-3" aria-label="Códigos QR por mesa">
+          <h2 className="font-heading text-xl font-bold tracking-tight">Códigos QR por mesa</h2>
+          <ul className="az-rows">
+            {data.tables.map((table) => {
+              const sectionName = sectionNames.get(table.sectionId) ?? "Sección";
+              const version = table.qrVersion ?? 1;
+              return (
+                <li key={table._id}>
+                  <div className="az-row-main">
+                    <div className="az-row-text">
+                      <div className="az-cluster">
+                        <strong>{table.tableNumber}</strong>
+                        {table.qrEnabled ? (
+                          <span className="az-badge success">
+                            <Check aria-hidden="true" />
+                            Activo
+                          </span>
+                        ) : (
+                          <span className="az-badge">
+                            <EyeOff aria-hidden="true" />
+                            Pausado
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {sectionName} · Versión {version} del código · {table.seatCount} pers.
+                      </p>
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      {sectionName} · Versión {version} del código · {table.seatCount} pers.
-                    </p>
+                    <div className="az-row-actions">
+                      <a
+                        href={tablePath(table)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs font-semibold hover:border-foreground"
+                      >
+                        Abrir vista comensal
+                        <ExternalLink className="size-3.5" aria-hidden="true" />
+                      </a>
+                      <Button variant="outline" size="sm" onClick={() => setSelectedId(table._id)}>
+                        <QrCode className="size-4" aria-hidden="true" />
+                        Ver código
+                      </Button>
+                    </div>
                   </div>
-                  <Button variant="outline" size="sm" onClick={() => setSelectedId(table._id)}>
-                    <QrCode className="size-4" aria-hidden="true" />
-                    Ver código
-                  </Button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
       ) : (
         <EmptyState
           icon={<QrCode className="size-7" aria-hidden="true" />}
@@ -193,36 +277,128 @@ export function QrPanel({
         />
       )}
 
-      {selectedTable && (
+      {publicMenuModal && publicQrModel && (
+        <AdminModal title="QR · Carta pública" onClose={() => setPublicMenuModal(false)}>
+          <div className="az-qr-box">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox={`0 0 ${publicQrModel.size} ${publicQrModel.size}`}
+              role="img"
+              aria-label={`Código QR de la carta pública de ${data.restaurantName}`}
+              shapeRendering="crispEdges"
+            >
+              <rect width={publicQrModel.size} height={publicQrModel.size} fill="#ffffff" />
+              <path fill="#15140f" d={publicQrModel.path} />
+            </svg>
+          </div>
+          <p className="text-xs font-mono text-muted-foreground break-all text-center">
+            {publicMenuUrl}
+          </p>
+          <div className="grid gap-2">
+            <a
+              href={publicMenuPath}
+              target="_blank"
+              rel="noreferrer"
+              className="site-button inline-flex items-center justify-center bg-foreground text-card"
+            >
+              <ExternalLink className="size-4" aria-hidden="true" />
+              Abrir carta pública
+            </a>
+            <Button variant="outline" onClick={() => void copyUrl(publicMenuUrl, "carta pública")}>
+              <Copy className="size-4" aria-hidden="true" />
+              Copiar enlace
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => downloadSvg("carta pública", publicMenuUrl, "carta_publica")}
+            >
+              <Download className="size-4" aria-hidden="true" />
+              Descargar SVG
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() =>
+                printQr(
+                  "Carta pública",
+                  `${locationName} · Menú digital`,
+                  publicMenuUrl,
+                  "Escanea para consultar nuestra carta",
+                )
+              }
+            >
+              <Printer className="size-4" aria-hidden="true" />
+              Imprimir código
+            </Button>
+          </div>
+        </AdminModal>
+      )}
+
+      {selectedTable && selectedQrModel && (
         <AdminModal title={`Código QR de ${selectedTable.tableNumber}`} onClose={() => setSelectedId(null)}>
           <div className="az-qr-box">
             <svg
               xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 33 33"
+              viewBox={`0 0 ${selectedQrModel.size} ${selectedQrModel.size}`}
               role="img"
               aria-label={`Código QR de ${selectedTable.tableNumber}`}
               shapeRendering="crispEdges"
             >
-              <path
-                fill="currentColor"
-                fillRule="evenodd"
-                d={qrPathFor(`${selectedTable._id}:${selectedTable.qrToken}`)}
-              />
+              <rect width={selectedQrModel.size} height={selectedQrModel.size} fill="#ffffff" />
+              <path fill="#15140f" d={selectedQrModel.path} />
             </svg>
           </div>
 
+          <p className="text-xs font-mono text-muted-foreground break-all text-center">
+            {tableUrl(selectedTable)}
+          </p>
+
           <p className="text-sm text-muted-foreground">
-            <strong>Versión {selectedTable.qrVersion ?? 1}.</strong> Cada código identifica de forma única a esta mesa.
-            Si el código impreso se extravía, regenerarlo invalida inmediatamente el anterior. El menú interactivo del
-            comensal se conectará en la siguiente etapa.
+            <strong>Versión {selectedTable.qrVersion ?? 1}.</strong> Al escanear este código, el
+            comensal ve la carta en vivo, puede llamar al mesero y pedir la cuenta cuando ya recibió
+            todos sus platillos. Regenerarlo invalida inmediatamente el anterior.
           </p>
 
           <div className="grid gap-2">
-            <Button variant="outline" onClick={() => downloadSvg(selectedTable)}>
+            <a
+              href={tablePath(selectedTable)}
+              target="_blank"
+              rel="noreferrer"
+              className="site-button inline-flex items-center justify-center bg-foreground text-card"
+            >
+              <ExternalLink className="size-4" aria-hidden="true" />
+              Abrir vista del comensal
+            </a>
+            <Button
+              variant="outline"
+              onClick={() => void copyUrl(tableUrl(selectedTable), selectedTable.tableNumber)}
+            >
+              <Copy className="size-4" aria-hidden="true" />
+              Copiar enlace
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() =>
+                downloadSvg(
+                  selectedTable.tableNumber,
+                  tableUrl(selectedTable),
+                  selectedTable.tableNumber.replace(/\s+/g, "_").toLowerCase(),
+                )
+              }
+            >
               <Download className="size-4" aria-hidden="true" />
               Descargar SVG
             </Button>
-            <Button variant="outline" onClick={() => printQr(selectedTable)}>
+            <Button
+              variant="outline"
+              onClick={() =>
+                printQr(
+                  selectedTable.tableNumber,
+                  `${selectedTable.tableNumber} · Versión ${selectedTable.qrVersion ?? 1}`,
+                  tableUrl(selectedTable),
+                  "Escanea para ver la carta, llamar al mesero o pedir tu cuenta",
+                )
+              }
+            >
               <Printer className="size-4" aria-hidden="true" />
               Imprimir código
             </Button>

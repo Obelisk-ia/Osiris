@@ -10,7 +10,13 @@ export const metadata: Metadata = { title: "Códigos QR" };
 async function QrContent() {
   const { options, registration } = await requireAdminSession();
   const preloaded = await preloadQuery(api.floor.snapshot, {}, options);
-  return <QrPanel preloaded={preloaded} locationName={registration.location.name} />;
+  return (
+    <QrPanel
+      preloaded={preloaded}
+      locationId={registration.location._id}
+      locationName={registration.location.name}
+    />
+  );
 }
 
 export default function QrPage() {

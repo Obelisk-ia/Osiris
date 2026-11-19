@@ -29,6 +29,9 @@ async function AccountContent() {
     ) {
       redirect("/cuenta/mesas");
     }
+    if (registration.staff.roles.includes("cashier")) {
+      redirect("/cuenta/caja");
+    }
     if (
       registration.staff.roles.some(
         (role) =>

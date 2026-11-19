@@ -1,13 +1,18 @@
 "use client";
 
 import { useMutation, usePreloadedQuery, type Preloaded } from "convex/react";
-import { BadgeCheck, Check, ChevronRight, Info, Plus } from "lucide-react";
+import { Check, ChevronRight, Info, Plus, Receipt, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { AdminModal, AdminPageHead, ConfirmModal, ToastBanner, useToast } from "@/components/restaurant/admin/admin-ui";
+import { AdminModal, AdminPageHead, ToastBanner, useToast } from "@/components/restaurant/admin/admin-ui";
+import { ChargeModal, type ChargeTarget } from "@/components/restaurant/cashier/charge-modal";
+import {
+  ReportPaymentModal,
+  type ReportPaymentTarget,
+} from "@/components/restaurant/waiter/report-payment-modal";
 import { Button } from "@/components/ui/button";
 import { errorMessage, formatMoney } from "@/lib/format";
 
@@ -35,17 +40,11 @@ export function TakeoutPanel({
 
   const createTakeout = useMutation(api.waiter.createTakeoutAccount);
   const deliverReady = useMutation(api.waiter.deliverReadyItems);
-  const confirmPayment = useMutation(api.waiter.confirmPayment);
 
   const [newOpen, setNewOpen] = useState(false);
   const [busyId, setBusyId] = useState<Id<"accounts"> | null>(null);
-  const [payingAcc, setPayingAcc] = useState<{
-    _id: Id<"accounts">;
-    customerName: string;
-    folio: number;
-    totalCents: number;
-  } | null>(null);
-  const [payingPending, setPayingPending] = useState(false);
+  const [reportingTarget, setReportingTarget] = useState<ReportPaymentTarget | null>(null);
+  const [chargeTarget, setChargeTarget] = useState<ChargeTarget | null>(null);
 
   const takeoutList = data.accounts.filter((a) => a.kind !== "counter");
   const counterList = data.accounts.filter((a) => a.kind === "counter" && !a.isPaid);
@@ -59,20 +58,6 @@ export function TakeoutPanel({
       showToast(errorMessage(cause), "err");
     } finally {
       setBusyId(null);
-    }
-  }
-
-  async function handleConfirmPayment() {
-    if (!payingAcc) return;
-    setPayingPending(true);
-    try {
-      await confirmPayment({ accountId: payingAcc._id });
-      showToast(`Cuenta de ${payingAcc.customerName} pagada y cerrada`);
-      setPayingAcc(null);
-    } catch (cause) {
-      showToast(errorMessage(cause, "No pudimos confirmar el pago."), "err");
-    } finally {
-      setPayingPending(false);
     }
   }
 
@@ -128,6 +113,8 @@ export function TakeoutPanel({
                           <Check aria-hidden="true" />
                           Pagado
                         </span>
+                      ) : acc.reportedPayment ? (
+                        <span className="az-badge accent">Pago reportado a caja</span>
                       ) : acc.state === "awaiting_payment" ? (
                         <span className="az-badge warn">Por cobrar</span>
                       ) : acc.deliveredUnits > 0 && acc.deliveredUnits < acc.totalUnits ? (
@@ -158,22 +145,46 @@ export function TakeoutPanel({
                         </Button>
                       )}
                       {!acc.isPaid && acc.hasItems && (acc.state === "awaiting_payment" || !acc.hasUndelivered) && (
-                        <Button
-                          type="button"
-                          size="xs"
-                          className="site-button"
-                          onClick={() =>
-                            setPayingAcc({
-                              _id: acc._id,
-                              customerName: acc.customerName,
-                              folio: acc.folio,
-                              totalCents: acc.totalCents,
-                            })
-                          }
-                        >
-                          <BadgeCheck className="size-3.5" aria-hidden="true" />
-                          Confirmar pago
-                        </Button>
+                        data.canCharge ? (
+                          <Button
+                            type="button"
+                            size="xs"
+                            className="site-button az-coral-cta"
+                            onClick={() =>
+                              setChargeTarget({
+                                accountId: acc._id,
+                                folio: acc.folio,
+                                label: `${KIND_LABELS[acc.kind]} · ${acc.customerName}`,
+                                totalCents: acc.totalCents,
+                                discountCents: acc.discountCents,
+                                paidCents: acc.paidCents,
+                                balanceCents: acc.balanceCents,
+                                reportedPayment: acc.reportedPayment,
+                              })
+                            }
+                          >
+                            <Wallet className="size-3.5" aria-hidden="true" />
+                            {acc.reportedPayment ? "Confirmar pago" : "Cobrar"}
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="outline"
+                            onClick={() =>
+                              setReportingTarget({
+                                accountId: acc._id,
+                                folio: acc.folio,
+                                label: `${KIND_LABELS[acc.kind]} · ${acc.customerName}`,
+                                balanceCents: acc.balanceCents,
+                                existingReport: acc.reportedPayment,
+                              })
+                            }
+                          >
+                            <Receipt className="size-3.5" aria-hidden="true" />
+                            {acc.reportedPayment ? "Editar reporte" : "Reportar pago"}
+                          </Button>
+                        )
                       )}
                     </div>
                   </article>
@@ -207,14 +218,27 @@ export function TakeoutPanel({
         </section>
       )}
 
-      {payingAcc && (
-        <ConfirmModal
-          title={`Confirmar pago · ${payingAcc.customerName}`}
-          message={`Folio A-${String(payingAcc.folio).padStart(4, "0")} por ${formatMoney(payingAcc.totalCents, data.currencyCode)}. Al confirmar, la cuenta se cerrará.`}
-          confirmLabel="Sí, confirmar pago"
-          pending={payingPending}
-          onConfirm={() => void handleConfirmPayment()}
-          onClose={() => setPayingAcc(null)}
+      {reportingTarget && (
+        <ReportPaymentModal
+          target={reportingTarget}
+          currencyCode={data.currencyCode}
+          onClose={() => setReportingTarget(null)}
+          onReported={(msg) => {
+            setReportingTarget(null);
+            showToast(msg);
+          }}
+        />
+      )}
+
+      {chargeTarget && (
+        <ChargeModal
+          target={chargeTarget}
+          currencyCode={data.currencyCode}
+          hasOpenShift={data.hasOpenShift}
+          onClose={() => setChargeTarget(null)}
+          onCompleted={({ closed }) => {
+            showToast(closed ? "Pedido cobrado y cerrado" : "Abono registrado");
+          }}
         />
       )}
 
