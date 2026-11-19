@@ -1,13 +1,13 @@
 "use client";
 
 import { useMutation, usePreloadedQuery, type Preloaded } from "convex/react";
-import { Check, ChevronRight, Info, Plus } from "lucide-react";
+import { BadgeCheck, Check, ChevronRight, Info, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { AdminModal, AdminPageHead, ToastBanner, useToast } from "@/components/restaurant/admin/admin-ui";
+import { AdminModal, AdminPageHead, ConfirmModal, ToastBanner, useToast } from "@/components/restaurant/admin/admin-ui";
 import { Button } from "@/components/ui/button";
 import { errorMessage, formatMoney } from "@/lib/format";
 
@@ -34,23 +34,45 @@ export function TakeoutPanel({
   const { toast, showToast } = useToast();
 
   const createTakeout = useMutation(api.waiter.createTakeoutAccount);
-  const markDelivered = useMutation(api.waiter.markAccountDelivered);
+  const deliverReady = useMutation(api.waiter.deliverReadyItems);
+  const confirmPayment = useMutation(api.waiter.confirmPayment);
 
   const [newOpen, setNewOpen] = useState(false);
   const [busyId, setBusyId] = useState<Id<"accounts"> | null>(null);
+  const [payingAcc, setPayingAcc] = useState<{
+    _id: Id<"accounts">;
+    customerName: string;
+    folio: number;
+    totalCents: number;
+  } | null>(null);
+  const [payingPending, setPayingPending] = useState(false);
 
   const takeoutList = data.accounts.filter((a) => a.kind !== "counter");
-  const counterList = data.accounts.filter((a) => a.kind === "counter");
+  const counterList = data.accounts.filter((a) => a.kind === "counter" && !a.isPaid);
 
   async function handleDeliver(accountId: Id<"accounts">) {
     setBusyId(accountId);
     try {
-      await markDelivered({ accountId });
+      await deliverReady({ accountId });
       showToast("Pedido marcado como entregado");
     } catch (cause) {
       showToast(errorMessage(cause), "err");
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function handleConfirmPayment() {
+    if (!payingAcc) return;
+    setPayingPending(true);
+    try {
+      await confirmPayment({ accountId: payingAcc._id });
+      showToast(`Cuenta de ${payingAcc.customerName} pagada y cerrada`);
+      setPayingAcc(null);
+    } catch (cause) {
+      showToast(errorMessage(cause, "No pudimos confirmar el pago."), "err");
+    } finally {
+      setPayingPending(false);
     }
   }
 
@@ -89,6 +111,9 @@ export function TakeoutPanel({
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Folio A-{String(acc.folio).padStart(4, "0")}
+                      {acc.promisedAt
+                        ? ` · Entrega ${new Date(acc.promisedAt).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", hour12: false })}`
+                        : ""}
                       {acc.customerPhone ? ` · ${acc.customerPhone}` : ""}
                     </p>
                     <p className="text-xs text-[#2a2620]">
@@ -98,9 +123,18 @@ export function TakeoutPanel({
                       <strong className="az-money text-sm">
                         {formatMoney(acc.totalCents, data.currencyCode)}
                       </strong>
-                      {acc.state === "awaiting_payment" && (
+                      {acc.isPaid ? (
+                        <span className="az-badge success">
+                          <Check aria-hidden="true" />
+                          Pagado
+                        </span>
+                      ) : acc.state === "awaiting_payment" ? (
                         <span className="az-badge warn">Por cobrar</span>
-                      )}
+                      ) : acc.deliveredUnits > 0 && acc.deliveredUnits < acc.totalUnits ? (
+                        <span className="az-badge partial">
+                          {acc.deliveredUnits}/{acc.totalUnits} entregados
+                        </span>
+                      ) : null}
                     </div>
                     <div className="flex flex-wrap gap-2 pt-1">
                       <Link
@@ -109,17 +143,36 @@ export function TakeoutPanel({
                       >
                         Abrir
                       </Link>
-                      {acc.hasUndelivered && (
+                      {!acc.isPaid && acc.stage === "listo" && acc.deliverableUnits > 0 && (
                         <Button
                           type="button"
                           size="xs"
-                          variant={acc.stage === "listo" ? "default" : "outline"}
-                          className={acc.stage === "listo" ? "az-coral-cta" : undefined}
+                          className="az-coral-cta"
                           disabled={busyId === acc._id}
                           onClick={() => void handleDeliver(acc._id)}
                         >
                           <Check className="size-3.5" aria-hidden="true" />
-                          Entregar
+                          {acc.deliverableUnits === acc.totalUnits
+                            ? "Marcar entregado"
+                            : `Entregar ${acc.deliverableUnits}`}
+                        </Button>
+                      )}
+                      {!acc.isPaid && acc.hasItems && (acc.state === "awaiting_payment" || !acc.hasUndelivered) && (
+                        <Button
+                          type="button"
+                          size="xs"
+                          className="site-button"
+                          onClick={() =>
+                            setPayingAcc({
+                              _id: acc._id,
+                              customerName: acc.customerName,
+                              folio: acc.folio,
+                              totalCents: acc.totalCents,
+                            })
+                          }
+                        >
+                          <BadgeCheck className="size-3.5" aria-hidden="true" />
+                          Confirmar pago
                         </Button>
                       )}
                     </div>
@@ -154,6 +207,17 @@ export function TakeoutPanel({
         </section>
       )}
 
+      {payingAcc && (
+        <ConfirmModal
+          title={`Confirmar pago · ${payingAcc.customerName}`}
+          message={`Folio A-${String(payingAcc.folio).padStart(4, "0")} por ${formatMoney(payingAcc.totalCents, data.currencyCode)}. Al confirmar, la cuenta se cerrará.`}
+          confirmLabel="Sí, confirmar pago"
+          pending={payingPending}
+          onConfirm={() => void handleConfirmPayment()}
+          onClose={() => setPayingAcc(null)}
+        />
+      )}
+
       {newOpen && (
         <NewTakeoutModal
           restaurantName={data.restaurantName}
@@ -182,11 +246,16 @@ function NewTakeoutModal({
     kind: "takeaway" | "pickup" | "counter";
     customerName?: string;
     customerPhone?: string;
+    promisedAt?: number;
     phoneConsent?: boolean;
   }) => Promise<void>;
 }) {
   const [kind, setKind] = useState<"takeaway" | "pickup" | "counter">("takeaway");
   const [name, setName] = useState("");
+  const [etaTime, setEtaTime] = useState(() => {
+    const target = new Date(Date.now() + 25 * 60_000);
+    return `${String(target.getHours()).padStart(2, "0")}:${String(target.getMinutes()).padStart(2, "0")}`;
+  });
   const [phone, setPhone] = useState("");
   const [consent, setConsent] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -195,8 +264,17 @@ function NewTakeoutModal({
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    let promisedAt: number | undefined;
     if (kind !== "counter") {
       if (!name.trim()) return setError("Escribe el nombre del cliente.");
+      if (!etaTime) return setError("Elige la hora estimada de entrega.");
+      const [h, m] = etaTime.split(":").map(Number);
+      if (!Number.isFinite(h) || !Number.isFinite(m)) {
+        return setError("Escribe una hora estimada válida.");
+      }
+      const d = new Date();
+      d.setHours(h, m, 0, 0);
+      promisedAt = d.getTime();
       if (phone.trim()) {
         const digits = phone.replace(/\D/g, "");
         if (digits.length !== 10) return setError("Escribe un teléfono de 10 dígitos.");
@@ -209,6 +287,7 @@ function NewTakeoutModal({
         kind,
         customerName: name.trim() || undefined,
         customerPhone: phone.trim() || undefined,
+        promisedAt,
         phoneConsent: phone.trim() ? consent : undefined,
       });
     } catch (cause) {
@@ -261,17 +340,29 @@ function NewTakeoutModal({
             />
           </div>
           {kind !== "counter" && (
-            <div className="az-field full">
-              <label htmlFor="to-phone">Teléfono (opcional, 10 dígitos)</label>
-              <input
-                id="to-phone"
-                type="tel"
-                inputMode="tel"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="5512345678"
-              />
-            </div>
+            <>
+              <div className="az-field">
+                <label htmlFor="to-eta">Hora estimada de entrega</label>
+                <input
+                  id="to-eta"
+                  type="time"
+                  value={etaTime}
+                  onChange={(e) => setEtaTime(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="az-field">
+                <label htmlFor="to-phone">Teléfono (opcional, 10 dígitos)</label>
+                <input
+                  id="to-phone"
+                  type="tel"
+                  inputMode="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="5512345678"
+                />
+              </div>
+            </>
           )}
         </div>
 

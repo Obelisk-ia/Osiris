@@ -2,13 +2,11 @@ import { ConvexError, v } from "convex/values";
 import schema from "./schema";
 import { query, mutation, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
+import { deriveAccountTableStatus, loadAccountOrderItemsLite } from "./model/orders";
+import { tableStatus } from "./model/validators";
 import type { Doc, Id } from "./_generated/dataModel";
 
 const EDITORS = ["owner", "manager"] as const;
-
-const tableStatus = v.union(
-  v.literal("empty"), v.literal("occupied"), v.literal("attended"), v.literal("payment"),
-);
 
 const sectionView = v.object({
   ...schema.doc("sections").fields,
@@ -54,20 +52,8 @@ async function tableStatusFor(ctx: QueryCtx, table: Doc<"diningTables">): Promis
   if (!account || account.state === "closed" || account.state === "voided") return "empty";
   if (account.state === "awaiting_payment") return "payment";
   if (account.state === "open") {
-    const orders = await ctx.db
-      .query("orders")
-      .withIndex("by_accountId", (q) => q.eq("accountId", account._id))
-      .take(30);
-    for (const order of orders) {
-      const items = await ctx.db
-        .query("orderItems")
-        .withIndex("by_orderId", (q) => q.eq("orderId", order._id))
-        .take(50);
-      if (items.some((item) => item.status === "ready")) {
-        return "attended";
-      }
-    }
-    return "occupied";
+    const items = await loadAccountOrderItemsLite(ctx, account._id);
+    return deriveAccountTableStatus(account.state, items);
   }
   return table.status;
 }

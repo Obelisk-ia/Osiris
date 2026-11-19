@@ -67,8 +67,8 @@ export const completeRegistration = mutation({
     }
 
     const roles = [...new Set(registration.roles)].sort();
-    if (roles.length < 1 || registration.roles.length > 5) {
-      return { success: false as const, message: "Elige al menos un rol; puedes combinar hasta cinco." };
+    if (roles.length < 1 || registration.roles.length > 6) {
+      return { success: false as const, message: "Elige al menos un rol; puedes combinar hasta seis." };
     }
     const { ip } = await ctx.meta.getRequestMetadata();
     if (ip === null) return { success: false as const, message: "No pudimos verificar la solicitud. Vuelve a intentar." };

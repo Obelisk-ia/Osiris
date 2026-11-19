@@ -1,6 +1,7 @@
 export const operationalRoles = [
   { value: "waiter", label: "Mesero" },
   { value: "chef", label: "Chef" },
+  { value: "bar", label: "Barra" },
   { value: "bartender", label: "Bartender" },
   { value: "barista", label: "Barista" },
   { value: "cashier", label: "Caja" },
@@ -8,19 +9,65 @@ export const operationalRoles = [
 
 export type OperationalRole = typeof operationalRoles[number]["value"];
 export type StaffRole = OperationalRole | "owner" | "manager";
+export type KitchenRole = "chef" | "bar" | "bartender" | "barista";
+export type PreparationArea = "kitchen" | "bar" | "cocktails" | "coffee";
+
 export const roleLabels: Record<StaffRole, string> = {
-  owner: "Dueño", manager: "Gerente", waiter: "Mesero", chef: "Chef",
-  bartender: "Bartender", barista: "Barista", cashier: "Caja",
+  owner: "Dueño",
+  manager: "Gerente",
+  waiter: "Mesero",
+  chef: "Chef",
+  bar: "Barra",
+  bartender: "Bartender",
+  barista: "Barista",
+  cashier: "Caja",
 };
 
-// Chef, bartender and barista are one *selection*. They remain three distinct
-// stored roles because preparation stations are granted per station type; a
-// person who picks this option can cover every kitchen/bar station.
-export const kitchenRoles = ["chef", "bartender", "barista"] as const;
-const kitchenRoleSet = new Set<string>(kitchenRoles);
+export const kitchenRoles: readonly KitchenRole[] = ["chef", "bar", "bartender", "barista"] as const;
+
+export const PREPARATION_AREAS: readonly PreparationArea[] = [
+  "kitchen",
+  "bar",
+  "cocktails",
+  "coffee",
+] as const;
+
+export const PREPARATION_AREA_META: Record<
+  PreparationArea,
+  { area: PreparationArea; name: string; role: KitchenRole }
+> = {
+  kitchen: { area: "kitchen", name: "Cocina", role: "chef" },
+  bar: { area: "bar", name: "Barra", role: "bar" },
+  cocktails: { area: "cocktails", name: "Coctelería", role: "bartender" },
+  coffee: { area: "coffee", name: "Cafetería", role: "barista" },
+};
+
+export const ROLE_TO_AREA: Record<KitchenRole, PreparationArea> = {
+  chef: "kitchen",
+  bar: "bar",
+  bartender: "cocktails",
+  barista: "coffee",
+};
+
+export function areasForStaffRoles(roles: readonly StaffRole[]): PreparationArea[] {
+  if (roles.includes("owner") || roles.includes("manager")) {
+    return [...PREPARATION_AREAS];
+  }
+  const areas: PreparationArea[] = [];
+  for (const area of PREPARATION_AREAS) {
+    if (roles.includes(PREPARATION_AREA_META[area].role)) {
+      areas.push(area);
+    }
+  }
+  return areas;
+}
+
+export function isKitchenStaffRole(role: StaffRole): role is KitchenRole {
+  return role === "chef" || role === "bar" || role === "bartender" || role === "barista";
+}
 
 export type RoleSelection = {
-  value: "waiter" | "kitchen" | "cashier";
+  value: OperationalRole;
   label: string;
   hint?: string;
   roles: readonly OperationalRole[];
@@ -28,10 +75,10 @@ export type RoleSelection = {
 
 export const roleSelections: readonly RoleSelection[] = [
   { value: "waiter", label: "Mesero", hint: "El salón y las mesas.", roles: ["waiter"] },
-  {
-    value: "kitchen", label: "Cocina y barra", hint: "Chef, bartender y barista.",
-    roles: kitchenRoles,
-  },
+  { value: "chef", label: "Chef (Cocina)", hint: "Platillos y comandas de cocina.", roles: ["chef"] },
+  { value: "bar", label: "Barra", hint: "Barra fría, sushi y preparación en barra.", roles: ["bar"] },
+  { value: "bartender", label: "Bartender (Coctelería)", hint: "Cócteles, tragos y mixología.", roles: ["bartender"] },
+  { value: "barista", label: "Barista (Cafetería)", hint: "Café, té y bebidas calientes.", roles: ["barista"] },
   { value: "cashier", label: "Caja", hint: "Cobros y cortes.", roles: ["cashier"] },
 ];
 
@@ -46,34 +93,16 @@ export function toggleRoleSelection(
   return roles.filter((role) => !selection.roles.includes(role));
 }
 
-// Collapse the three kitchen roles back into one label for display, so the UI
-// reads the same way it did when the person selected their role.
 export function formatRoles(roles: readonly StaffRole[]): string[] {
-  const hasAllKitchen = kitchenRoles.every((role) => roles.includes(role));
-  const labels: string[] = [];
-  let kitchenAdded = false;
-  for (const role of roles) {
-    if (kitchenRoleSet.has(role)) {
-      if (hasAllKitchen) {
-        if (!kitchenAdded) labels.push(roleSelections[1].label);
-        kitchenAdded = true;
-      } else {
-        // Partial kitchen roles can exist from the API or older data.
-        labels.push(roleLabels[role]);
-      }
-      continue;
-    }
-    labels.push(roleLabels[role]);
-  }
-  return labels;
+  return roles.map((role) => roleLabels[role]);
 }
 
 export const workspaces = [
   { value: "administracion", label: "Administración", description: "Menú, inventario, buffet, QR, equipo y sucursales.", roles: ["owner", "manager"] },
   { value: "mesas", label: "Mesas", description: "El salón y las mesas que atiendes.", roles: ["waiter"] },
-  { value: "cocina", label: "Cocina y barra", description: "La preparación de cada pedido.", roles: ["chef", "bartender", "barista"] },
+  { value: "cocina", label: "Cocina y estaciones", description: "La preparación de cada pedido por área.", roles: ["chef", "bar", "bartender", "barista"] },
   { value: "caja", label: "Caja", description: "Las cuentas pendientes de pago.", roles: ["cashier"] },
-  { value: "buffet", label: "Buffet", description: "Los menús y el servicio de buffet.", roles: ["waiter", "chef", "bartender", "barista"] },
+  { value: "buffet", label: "Buffet", description: "Los menús y el servicio de buffet.", roles: ["waiter", "chef", "bar", "bartender", "barista"] },
 ] as const;
 export type Workspace = typeof workspaces[number]["value"];
 

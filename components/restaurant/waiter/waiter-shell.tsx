@@ -4,6 +4,7 @@ import { useAuthActions, useAuthToken } from "@convex-dev/auth/react";
 import { useConvexAuth, useQuery } from "convex/react";
 import {
   ArrowLeft,
+  Bell,
   ChevronsUpDown,
   Grid2x2,
   LogOut,
@@ -18,6 +19,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { api } from "@/convex/_generated/api";
 import { AdminModal } from "@/components/restaurant/admin/admin-ui";
+import { NotificationsBell, useNotificationsState } from "@/components/restaurant/notifications-bell";
 import { formatRoles, type StaffRole } from "@/lib/restaurant-roles";
 import { formatShortDate, initials, toRoman } from "@/lib/format";
 
@@ -42,6 +44,7 @@ export function WaiterShell({
 
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [mobileAccountOpen, setMobileAccountOpen] = useState(false);
+  const [avisosOpen, setAvisosOpen] = useState(false);
   const [signingOutToken, setSigningOutToken] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
   const menuWrapRef = useRef<HTMLDivElement>(null);
@@ -52,6 +55,7 @@ export function WaiterShell({
 
   const live = useQuery(api.restaurants.current, canQuery ? {} : "skip");
   const tablesSnap = useQuery(api.waiter.tablesSnapshot, canQuery ? {} : "skip");
+  const { unreadCount } = useNotificationsState(canQuery);
 
   const restaurantName = live?.restaurant.name ?? initialRestaurantName;
   const locationName = live?.location.name ?? initialLocationName;
@@ -84,7 +88,9 @@ export function WaiterShell({
     pathname.startsWith("/cuenta/mesero/mesa/") || pathname.startsWith("/cuenta/mesero/cuenta/");
   const isTables = !isTakeout;
 
-  const hasKitchen = roles.some((r) => r === "chef" || r === "bartender" || r === "barista");
+  const hasKitchen = roles.some(
+    (r) => r === "chef" || r === "bar" || r === "bartender" || r === "barista",
+  );
   const hasCashier = roles.includes("cashier");
 
   async function handleSignOut() {
@@ -106,7 +112,7 @@ export function WaiterShell({
   }
 
   const extraWorkspaces: Array<{ href: string; label: string; icon: typeof Wallet }> = [];
-  if (hasKitchen) extraWorkspaces.push({ href: "/cuenta/cocina", label: "Cocina y barra", icon: UtensilsCrossed });
+  if (hasKitchen) extraWorkspaces.push({ href: "/cuenta/cocina", label: "Cocina y estaciones", icon: UtensilsCrossed });
   if (hasCashier) extraWorkspaces.push({ href: "/cuenta/caja", label: "Caja", icon: Wallet });
 
   const accountMenuBody = (
@@ -246,6 +252,7 @@ export function WaiterShell({
           <i aria-hidden="true" />
           Mesero
         </span>
+        <NotificationsBell canQuery={canQuery} open={avisosOpen} onOpenChange={setAvisosOpen} />
         <button
           type="button"
           className="az-only-mobile inline-flex items-center justify-center rounded-full"
@@ -295,6 +302,14 @@ export function WaiterShell({
           <ShoppingBag aria-hidden="true" />
           <span>Para llevar</span>
         </Link>
+        <button
+          type="button"
+          className="az-nav-btn"
+          onClick={() => setAvisosOpen(true)}
+        >
+          <Bell aria-hidden="true" />
+          <span>{unreadCount > 0 ? `Avisos (${unreadCount})` : "Avisos"}</span>
+        </button>
         <button
           type="button"
           className="az-nav-btn"

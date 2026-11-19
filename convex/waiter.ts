@@ -1,25 +1,38 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { requireStaff, safeInteger } from "./model/access";
-import { accountState, orderStatus, preparationArea, preparationStatus } from "./model/validators";
+import { requireStaff, requiredText, safeInteger } from "./model/access";
+import { reconcileCancelledRecipe } from "./model/inventory";
+import { emitNotification } from "./model/notifications";
+import {
+  computeItemProgress,
+  getDeliveredQuantity,
+  getInventoryConsumedQuantity,
+  getPrepReadyQuantity,
+  getPrepStartedQuantity,
+  resolveStationArea,
+  resolveStationRole,
+  syncAccountTableStatus,
+  syncOrderAndAccountTable,
+  syncOrderItemStatus,
+} from "./model/orders";
+import { accountState, orderStatus, preparationArea, preparationStatus, tableStatus } from "./model/validators";
+import {
+  PREPARATION_AREAS,
+  PREPARATION_AREA_META,
+  type PreparationArea,
+} from "../lib/restaurant-roles";
 
 const SERVICE_ROLES = ["waiter", "owner", "manager"] as const;
-const ALL_AREAS = ["kitchen", "bar", "cocktails", "coffee"] as const;
-type PreparationArea = (typeof ALL_AREAS)[number];
-
-const AREA_META: Record<PreparationArea, { name: string; role: "chef" | "bartender" | "barista" }> = {
-  kitchen: { name: "Cocina", role: "chef" },
-  bar: { name: "Barra", role: "bartender" },
-  cocktails: { name: "Coctelería", role: "bartender" },
-  coffee: { name: "Cafetería", role: "barista" },
-};
+const ALL_AREAS = PREPARATION_AREAS;
+const AREA_META = PREPARATION_AREA_META;
 
 const ORDER_STAGE_INDEX: Record<Doc<"orderItems">["status"], number> = {
   ordered: 0,
   preparing: 1,
   ready: 2,
   delivered: 3,
+  cancelled: 4,
 };
 
 async function serviceStaff(ctx: QueryCtx | MutationCtx) {
@@ -59,8 +72,12 @@ async function ensureStationForArea(
     .withIndex("by_locationId_and_name", (q) => q.eq("locationId", staff.locationId).eq("name", meta.name))
     .unique();
   if (existing) {
-    if (!existing.isActive) {
-      await ctx.db.patch("preparationStations", existing._id, { isActive: true });
+    if (!existing.isActive || existing.role !== meta.role || existing.area !== area) {
+      await ctx.db.patch("preparationStations", existing._id, {
+        isActive: true,
+        role: meta.role,
+        area,
+      });
     }
     return existing._id;
   }
@@ -69,6 +86,7 @@ async function ensureStationForArea(
     locationId: staff.locationId,
     name: meta.name,
     role: meta.role,
+    area,
     isActive: true,
   });
 }
@@ -108,12 +126,27 @@ async function loadAccountItems(ctx: QueryCtx, accountId: Id<"accounts">) {
     dishId: Id<"dishes">;
     dishName: string;
     quantity: number;
+    effectiveReadyQuantity: number;
+    deliveredQuantity: number;
+    deliverableQuantity: number;
+    inventoryConsumedQuantity: number;
+    cancelReason: string | null;
+    cancelInventoryAction: "none" | "return" | "waste" | null;
+    cancelledAt: number | null;
+    stationLabel: string;
     unitPriceCents: number;
     lineTotalCents: number;
     comments: string;
     status: Doc<"orderItems">["status"];
     modifiers: Array<{ groupName: string; optionName: string; unitPriceExtraCents: number }>;
-    preparations: Array<{ stationName: string; status: Doc<"orderItemPreparations">["status"] }>;
+    preparations: Array<{
+      stationId: Id<"preparationStations">;
+      stationName: string;
+      area: PreparationArea;
+      status: Doc<"orderItemPreparations">["status"];
+      startedQuantity: number;
+      readyQuantity: number;
+    }>;
   }> = [];
 
   for (const order of orders) {
@@ -134,15 +167,26 @@ async function loadAccountItems(ctx: QueryCtx, accountId: Id<"accounts">) {
       ]);
       const extraPerUnit = mods.reduce((sum, m) => sum + m.unitPriceExtraCents * m.quantity, 0);
       const lineTotalCents = (item.unitPriceCents + extraPerUnit) * item.quantity;
-      const hydratedPreps = await Promise.all(
-        preps.map(async (prep) => {
-          const station = await ctx.db.get("preparationStations", prep.stationId);
-          return {
-            stationName: station?.name ?? "Cocina",
-            status: prep.status,
-          };
-        }),
-      );
+      const hydratedPreps = (
+        await Promise.all(
+          preps.map(async (prep) => {
+            const station = await ctx.db.get("preparationStations", prep.stationId);
+            return {
+              stationId: prep.stationId,
+              stationName: station?.name ?? "Cocina",
+              area: station ? resolveStationArea(station) : ("kitchen" as const),
+              status: prep.status,
+              startedQuantity: getPrepStartedQuantity(prep, item.quantity),
+              readyQuantity: getPrepReadyQuantity(prep, item.quantity),
+            };
+          }),
+        )
+      ).sort((a, b) => AREA_SORT_ORDER[a.area] - AREA_SORT_ORDER[b.area]);
+      const progress = computeItemProgress(item, preps);
+      const stationLabel =
+        hydratedPreps.length > 0
+          ? hydratedPreps.map((p) => p.stationName).join(" + ")
+          : "Cocina";
       items.push({
         _id: item._id,
         _creationTime: item._creationTime,
@@ -150,10 +194,18 @@ async function loadAccountItems(ctx: QueryCtx, accountId: Id<"accounts">) {
         dishId: item.dishId,
         dishName: item.dishName,
         quantity: item.quantity,
+        effectiveReadyQuantity: progress.effectiveReadyQuantity,
+        deliveredQuantity: progress.deliveredQuantity,
+        deliverableQuantity: progress.deliverableQuantity,
+        inventoryConsumedQuantity: getInventoryConsumedQuantity(item),
+        cancelReason: item.cancelReason ?? null,
+        cancelInventoryAction: item.cancelInventoryAction ?? null,
+        cancelledAt: item.cancelledAt ?? null,
+        stationLabel,
         unitPriceCents: item.unitPriceCents,
         lineTotalCents,
         comments: item.comments ?? "",
-        status: item.status,
+        status: progress.status,
         modifiers: mods.map((m) => ({
           groupName: m.groupName,
           optionName: m.optionName,
@@ -166,24 +218,84 @@ async function loadAccountItems(ctx: QueryCtx, accountId: Id<"accounts">) {
   return items;
 }
 
+const AREA_SORT_ORDER: Record<PreparationArea, number> = {
+  kitchen: 0,
+  bar: 1,
+  cocktails: 2,
+  coffee: 3,
+};
+
+const PLATE_SORT_PRIORITY: Record<Doc<"orderItems">["status"], number> = {
+  ready: 0,
+  preparing: 1,
+  ordered: 2,
+  delivered: 3,
+  cancelled: 4,
+};
+
 function summarizeAccount(items: Awaited<ReturnType<typeof loadAccountItems>>, state: Doc<"accounts">["state"]) {
+  const activeItems = items.filter((item) => item.status !== "cancelled");
   const progressStep =
-    items.length === 0
+    activeItems.length === 0
       ? -1
-      : Math.min(...items.map((item) => ORDER_STAGE_INDEX[item.status]));
-  const hasReady = items.some((item) => item.status === "ready");
-  const hasUndelivered = items.some((item) => item.status !== "delivered");
+      : Math.min(...activeItems.map((item) => ORDER_STAGE_INDEX[item.status]));
+  const hasReady = activeItems.some((item) => item.deliverableQuantity > 0);
+  const hasDelivered = activeItems.some((item) => item.deliveredQuantity > 0);
+  const hasUndelivered = activeItems.some((item) => item.deliveredQuantity < item.quantity);
+  const deliverableUnits = activeItems.reduce((sum, item) => sum + item.deliverableQuantity, 0);
+  const deliveredUnits = activeItems.reduce((sum, item) => sum + item.deliveredQuantity, 0);
+  const totalUnits = activeItems.reduce((sum, item) => sum + item.quantity, 0);
   const tableStatus =
     state === "awaiting_payment"
       ? ("payment" as const)
       : hasReady
         ? ("ready" as const)
-        : ("occupied" as const);
+        : hasDelivered && hasUndelivered
+          ? ("partial" as const)
+          : ("occupied" as const);
 
-  // Group undelivered items by preparation station for concise progress lines.
+  // Plate-centric checklist data: each active ordered dish appears ONCE with exact
+  // counts for delivered / ready / preparing / ordered (no station duplication).
+  const plates = activeItems
+    .map((item) => {
+      const doneOrReady = item.deliveredQuantity + item.deliverableQuantity;
+      const remaining = Math.max(0, item.quantity - doneOrReady);
+      const maxStarted = Math.max(
+        doneOrReady,
+        ...item.preparations.map((p) => p.startedQuantity),
+      );
+      const preparingQuantity = Math.max(0, Math.min(remaining, maxStarted - doneOrReady));
+      const pendingQuantity = Math.max(0, remaining - preparingQuantity);
+      return {
+        orderItemId: item._id,
+        dishName: item.dishName,
+        quantity: item.quantity,
+        effectiveReadyQuantity: item.effectiveReadyQuantity,
+        deliveredQuantity: item.deliveredQuantity,
+        deliverableQuantity: item.deliverableQuantity,
+        preparingQuantity,
+        pendingQuantity,
+        comments: item.comments,
+        modifiersText: item.modifiers.map((m) => m.optionName).join(", "),
+        status: item.status,
+        progressStep: ORDER_STAGE_INDEX[item.status],
+        stationLabel: item.stationLabel,
+        stations: item.preparations.map((p) => ({
+          stationId: p.stationId,
+          stationName: p.stationName,
+          area: p.area,
+          startedQuantity: p.startedQuantity,
+          readyQuantity: p.readyQuantity,
+          status: p.status,
+        })),
+      };
+    })
+    .sort((a, b) => PLATE_SORT_PRIORITY[a.status] - PLATE_SORT_PRIORITY[b.status]);
+
+  // Group undelivered active items by preparation station for concise progress lines.
   const areaBuckets = new Map<string, { status: string; names: string[] }>();
-  for (const item of items) {
-    if (item.status === "delivered") continue;
+  for (const item of activeItems) {
+    if (item.deliveredQuantity >= item.quantity) continue;
     const label = `${item.quantity} × ${item.dishName}`;
     if (item.preparations.length === 0) {
       const key = "Cocina";
@@ -205,12 +317,125 @@ function summarizeAccount(items: Awaited<ReturnType<typeof loadAccountItems>>, s
     itemsText: bucket.names.join(", "),
   }));
 
-  return { progressStep, hasReady, hasUndelivered, tableStatus, areaSummaries };
+  // Station summary retained for API compatibility.
+  const sectionMap = new Map<
+    Id<"preparationStations">,
+    {
+      stationId: Id<"preparationStations">;
+      stationName: string;
+      area: PreparationArea;
+      items: Array<{
+        orderItemId: Id<"orderItems">;
+        dishName: string;
+        quantity: number;
+        itemStatus: Doc<"orderItems">["status"];
+        prepStatus: Doc<"orderItemPreparations">["status"];
+        deliverableQuantity: number;
+        readyQuantity: number;
+        deliveredQuantity: number;
+        waitingStations: string[];
+      }>;
+    }
+  >();
+
+  for (const item of activeItems) {
+    for (const prep of item.preparations) {
+      let bucket = sectionMap.get(prep.stationId);
+      if (!bucket) {
+        bucket = {
+          stationId: prep.stationId,
+          stationName: prep.stationName,
+          area: prep.area,
+          items: [],
+        };
+        sectionMap.set(prep.stationId, bucket);
+      }
+      const waitingStations =
+        prep.readyQuantity > item.effectiveReadyQuantity
+          ? item.preparations
+              .filter(
+                (other) =>
+                  other.stationId !== prep.stationId &&
+                  other.readyQuantity < prep.readyQuantity,
+              )
+              .map((other) => other.stationName)
+          : [];
+      bucket.items.push({
+        orderItemId: item._id,
+        dishName: item.dishName,
+        quantity: item.quantity,
+        itemStatus: item.status,
+        prepStatus: prep.status,
+        deliverableQuantity: item.deliverableQuantity,
+        readyQuantity: prep.readyQuantity,
+        deliveredQuantity: item.deliveredQuantity,
+        waitingStations,
+      });
+    }
+  }
+
+  const stationSections = [...sectionMap.values()]
+    .map((bucket) => {
+      const deliverableCount = bucket.items.filter((i) => i.deliverableQuantity > 0).length;
+      const deliveredCount = bucket.items.filter((i) => i.deliveredQuantity >= i.quantity).length;
+      const waitingItems = bucket.items.filter((i) => i.waitingStations.length > 0);
+      const waitingStationNames = [
+        ...new Set(waitingItems.flatMap((i) => i.waitingStations)),
+      ];
+      const allDelivered = bucket.items.length > 0 && deliveredCount === bucket.items.length;
+      const anyPreparingOrReady = bucket.items.some(
+        (i) => i.deliveredQuantity < i.quantity && i.prepStatus !== "ordered",
+      );
+      const status: Doc<"orderItems">["status"] = allDelivered
+        ? "delivered"
+        : deliverableCount > 0
+          ? "ready"
+          : anyPreparingOrReady
+            ? "preparing"
+            : "ordered";
+      return {
+        stationId: bucket.stationId,
+        stationName: bucket.stationName,
+        area: bucket.area,
+        status,
+        progressStep: ORDER_STAGE_INDEX[status],
+        deliverableCount,
+        waitingOnOtherCount: waitingItems.length,
+        waitingStationNames,
+        deliveredCount,
+        totalCount: bucket.items.length,
+        items: bucket.items.map((i) => ({
+          orderItemId: i.orderItemId,
+          dishName: i.dishName,
+          quantity: i.quantity,
+          itemStatus: i.itemStatus,
+          prepStatus: i.prepStatus,
+          waitingStations: i.waitingStations,
+        })),
+      };
+    })
+    .sort((a, b) => AREA_SORT_ORDER[a.area] - AREA_SORT_ORDER[b.area]);
+
+  return {
+    progressStep,
+    hasReady,
+    hasDelivered,
+    hasUndelivered,
+    deliverableUnits,
+    deliveredUnits,
+    totalUnits,
+    tableStatus,
+    plates,
+    areaSummaries,
+    stationSections,
+  };
 }
 
 async function recalculateAccountTotal(ctx: MutationCtx, accountId: Id<"accounts">): Promise<number> {
   const items = await loadAccountItems(ctx, accountId);
-  const totalCents = items.reduce((sum, item) => sum + item.lineTotalCents, 0);
+  const totalCents = items
+    .filter((item) => item.status !== "cancelled")
+    .reduce((sum, item) => sum + item.lineTotalCents, 0);
   await ctx.db.patch("accounts", accountId, { totalCents, updatedAt: Date.now() });
   return totalCents;
 }
@@ -242,6 +467,55 @@ const areaSummaryValidator = v.object({
   itemsText: v.string(),
 });
 
+const stationSectionItemValidator = v.object({
+  orderItemId: v.id("orderItems"),
+  dishName: v.string(),
+  quantity: v.number(),
+  itemStatus: orderStatus,
+  prepStatus: preparationStatus,
+  waitingStations: v.array(v.string()),
+});
+
+const stationSectionValidator = v.object({
+  stationId: v.id("preparationStations"),
+  stationName: v.string(),
+  area: preparationArea,
+  status: orderStatus,
+  progressStep: v.number(),
+  deliverableCount: v.number(),
+  waitingOnOtherCount: v.number(),
+  waitingStationNames: v.array(v.string()),
+  deliveredCount: v.number(),
+  totalCount: v.number(),
+  items: v.array(stationSectionItemValidator),
+});
+
+const plateStationValidator = v.object({
+  stationId: v.id("preparationStations"),
+  stationName: v.string(),
+  area: preparationArea,
+  startedQuantity: v.number(),
+  readyQuantity: v.number(),
+  status: preparationStatus,
+});
+
+const plateSummaryValidator = v.object({
+  orderItemId: v.id("orderItems"),
+  dishName: v.string(),
+  quantity: v.number(),
+  effectiveReadyQuantity: v.number(),
+  deliveredQuantity: v.number(),
+  deliverableQuantity: v.number(),
+  preparingQuantity: v.number(),
+  pendingQuantity: v.number(),
+  comments: v.string(),
+  modifiersText: v.string(),
+  status: orderStatus,
+  progressStep: v.number(),
+  stationLabel: v.string(),
+  stations: v.array(plateStationValidator),
+});
+
 const busyTableValidator = v.object({
   tableId: v.id("diningTables"),
   tableNumber: v.string(),
@@ -252,13 +526,18 @@ const busyTableValidator = v.object({
   accountState,
   openedAt: v.number(),
   totalCents: v.number(),
-  status: v.union(v.literal("occupied"), v.literal("ready"), v.literal("payment")),
+  status: v.union(v.literal("occupied"), v.literal("partial"), v.literal("ready"), v.literal("payment")),
   progressStep: v.number(),
   itemCount: v.number(),
+  deliverableUnits: v.number(),
+  deliveredUnits: v.number(),
+  totalUnits: v.number(),
   hasReady: v.boolean(),
   hasUndelivered: v.boolean(),
   assignedStaffName: v.union(v.string(), v.null()),
+  plates: v.array(plateSummaryValidator),
   areaSummaries: v.array(areaSummaryValidator),
+  stationSections: v.array(stationSectionValidator),
 });
 
 const freeTableValidator = v.object({
@@ -318,13 +597,18 @@ export const tablesSnapshot = query({
       accountState: Doc<"accounts">["state"];
       openedAt: number;
       totalCents: number;
-      status: "occupied" | "ready" | "payment";
+      status: "occupied" | "partial" | "ready" | "payment";
       progressStep: number;
       itemCount: number;
+      deliverableUnits: number;
+      deliveredUnits: number;
+      totalUnits: number;
       hasReady: boolean;
       hasUndelivered: boolean;
       assignedStaffName: string | null;
+      plates: ReturnType<typeof summarizeAccount>["plates"];
       areaSummaries: Array<{ stationName: string; status: string; itemsText: string }>;
+      stationSections: ReturnType<typeof summarizeAccount>["stationSections"];
     }> = [];
 
     const freeTables: Array<{
@@ -372,13 +656,18 @@ export const tablesSnapshot = query({
           totalCents: activeAccount.totalCents,
           status: summary.tableStatus,
           progressStep: summary.progressStep,
-          itemCount: items.reduce((sum, i) => sum + i.quantity, 0),
+          itemCount: summary.totalUnits,
+          deliverableUnits: summary.deliverableUnits,
+          deliveredUnits: summary.deliveredUnits,
+          totalUnits: summary.totalUnits,
           hasReady: summary.hasReady,
           hasUndelivered: summary.hasUndelivered,
           assignedStaffName: activeAccount.assignedStaffId
             ? staffNames.get(activeAccount.assignedStaffId) ?? null
             : null,
+          plates: summary.plates,
           areaSummaries: summary.areaSummaries,
+          stationSections: summary.stationSections,
         });
       } else {
         // Free table: visible if section is assigned to this waiter OR no one is in charge.
@@ -395,7 +684,7 @@ export const tablesSnapshot = query({
       }
     }
 
-    const priority = { ready: 0, occupied: 1, payment: 2 };
+    const priority = { ready: 0, partial: 1, occupied: 2, payment: 3 };
     busyTables.sort((a, b) => priority[a.status] - priority[b.status] || a.openedAt - b.openedAt);
     freeTables.sort((a, b) => a.tableNumber.localeCompare(b.tableNumber, "es-MX", { numeric: true }));
 
@@ -418,6 +707,14 @@ const orderItemView = v.object({
   dishId: v.id("dishes"),
   dishName: v.string(),
   quantity: v.number(),
+  effectiveReadyQuantity: v.number(),
+  deliveredQuantity: v.number(),
+  deliverableQuantity: v.number(),
+  inventoryConsumedQuantity: v.number(),
+  cancelReason: v.union(v.string(), v.null()),
+  cancelInventoryAction: v.union(v.literal("none"), v.literal("return"), v.literal("waste"), v.null()),
+  cancelledAt: v.union(v.number(), v.null()),
+  stationLabel: v.string(),
   unitPriceCents: v.number(),
   lineTotalCents: v.number(),
   comments: v.string(),
@@ -431,8 +728,12 @@ const orderItemView = v.object({
   ),
   preparations: v.array(
     v.object({
+      stationId: v.id("preparationStations"),
       stationName: v.string(),
+      area: preparationArea,
       status: preparationStatus,
+      startedQuantity: v.number(),
+      readyQuantity: v.number(),
     }),
   ),
 });
@@ -466,13 +767,20 @@ export const orderWorkspace = query({
         state: accountState,
         openedAt: v.number(),
         totalCents: v.number(),
+        assignedStaffId: v.union(v.id("staff"), v.null()),
         assignedStaffName: v.union(v.string(), v.null()),
         customerName: v.union(v.string(), v.null()),
         customerPhone: v.union(v.string(), v.null()),
         promisedAt: v.union(v.number(), v.null()),
         progressStep: v.number(),
+        tableStatus: v.union(v.literal("occupied"), v.literal("partial"), v.literal("ready"), v.literal("payment")),
+        deliverableUnits: v.number(),
+        deliveredUnits: v.number(),
+        totalUnits: v.number(),
         hasReady: v.boolean(),
         hasUndelivered: v.boolean(),
+        plates: v.array(plateSummaryValidator),
+        stationSections: v.array(stationSectionValidator),
         items: v.array(orderItemView),
       }),
     ),
@@ -481,6 +789,12 @@ export const orderWorkspace = query({
         _id: v.id("diningTables"),
         tableNumber: v.string(),
         sectionName: v.string(),
+      }),
+    ),
+    activeWaiters: v.array(
+      v.object({
+        _id: v.id("staff"),
+        displayName: v.string(),
       }),
     ),
     categories: v.array(v.object({ _id: v.id("dishCategories"), name: v.string() })),
@@ -566,7 +880,7 @@ export const orderWorkspace = query({
     const summary = account ? summarizeAccount(accountItems, account.state) : null;
 
     // Load live shared menu
-    const [categories, dishes, groups, balances, allSections, allTables] = await Promise.all([
+    const [categories, dishes, groups, balances, allSections, allTables, locationStaff] = await Promise.all([
       ctx.db
         .query("dishCategories")
         .withIndex("by_organizationId_and_sortOrder", (q) => q.eq("organizationId", staff.organizationId))
@@ -593,7 +907,17 @@ export const orderWorkspace = query({
           q.eq("locationId", staff.locationId).eq("isActive", true),
         )
         .take(120),
+      ctx.db
+        .query("staff")
+        .withIndex("by_locationId_and_isActive", (q) =>
+          q.eq("locationId", staff.locationId).eq("isActive", true),
+        )
+        .take(100),
     ]);
+    const activeWaiters = locationStaff
+      .filter((member) => member.roles.includes("waiter"))
+      .map((member) => ({ _id: member._id, displayName: member.displayName }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName, "es-MX"));
 
     const autoSoldOut = location?.autoSoldOut ?? true;
     const balanceMap = new Map(balances.map((b) => [b.inventoryItemId, b.quantityMicros] as const));
@@ -701,17 +1025,25 @@ export const orderWorkspace = query({
             state: account.state,
             openedAt: account._creationTime,
             totalCents: account.totalCents,
+            assignedStaffId: account.assignedStaffId ?? null,
             assignedStaffName: assignedStaffDoc?.displayName ?? null,
             customerName: account.customerName ?? null,
             customerPhone: account.customerPhone ?? null,
             promisedAt: account.promisedAt ?? null,
             progressStep: summary.progressStep,
+            tableStatus: summary.tableStatus,
+            deliverableUnits: summary.deliverableUnits,
+            deliveredUnits: summary.deliveredUnits,
+            totalUnits: summary.totalUnits,
             hasReady: summary.hasReady,
             hasUndelivered: summary.hasUndelivered,
+            plates: summary.plates,
+            stationSections: summary.stationSections,
             items: accountItems,
           }
         : null,
       freeTables,
+      activeWaiters,
       categories: activeCategories.map((c) => ({ _id: c._id, name: c.name })),
       dishes: menuDishes,
       modifierGroups: modifierGroupViews,
@@ -740,12 +1072,16 @@ export const takeoutSnapshot = query({
         itemsSummary: v.string(),
         hasItems: v.boolean(),
         hasUndelivered: v.boolean(),
+        deliverableUnits: v.number(),
+        deliveredUnits: v.number(),
+        totalUnits: v.number(),
+        isPaid: v.boolean(),
       }),
     ),
   }),
   handler: async (ctx) => {
     const staff = await serviceStaff(ctx);
-    const [restaurant, location, openAccounts, paymentAccounts] = await Promise.all([
+    const [restaurant, location, openAccounts, paymentAccounts, closedAccounts] = await Promise.all([
       ctx.db.get("organizations", staff.organizationId),
       ctx.db.get("locations", staff.locationId),
       ctx.db
@@ -760,10 +1096,21 @@ export const takeoutSnapshot = query({
         )
         .order("desc")
         .take(50),
+      ctx.db
+        .query("accounts")
+        .withIndex("by_locationId_and_state", (q) => q.eq("locationId", staff.locationId).eq("state", "closed"))
+        .order("desc")
+        .take(40),
     ]);
 
+    // Show today's paid takeout orders in the Entregado column (last 18 hours window).
+    const todayCutoff = Date.now() - 18 * 60 * 60 * 1000;
+    const recentClosed = closedAccounts.filter(
+      (acc) => acc.kind !== "dine_in" && (acc.closedAt ?? acc.updatedAt) >= todayCutoff,
+    );
+
     const admin = isManagerOrOwner(staff);
-    const relevant = [...openAccounts, ...paymentAccounts].filter((acc) => {
+    const relevant = [...openAccounts, ...paymentAccounts, ...recentClosed].filter((acc) => {
       if (acc.kind === "dine_in") return false;
       if (!admin && acc.assignedStaffId && acc.assignedStaffId !== staff._id) return false;
       return true;
@@ -772,15 +1119,17 @@ export const takeoutSnapshot = query({
     const accounts = await Promise.all(
       relevant.map(async (acc) => {
         const items = await loadAccountItems(ctx, acc._id);
+        const activeItems = items.filter((i) => i.status !== "cancelled");
         const summary = summarizeAccount(items, acc.state);
+        const isPaid = acc.state === "closed";
         const stage =
-          items.length === 0 || summary.progressStep === 0
-            ? ("nuevo" as const)
-            : summary.progressStep === 1
-              ? ("preparando" as const)
-              : summary.progressStep === 2
-                ? ("listo" as const)
-                : ("entregado" as const);
+          isPaid || (activeItems.length > 0 && !summary.hasUndelivered)
+            ? ("entregado" as const)
+            : summary.deliverableUnits > 0
+              ? ("listo" as const)
+              : activeItems.some((i) => i.status === "preparing" || i.deliveredQuantity > 0)
+                ? ("preparando" as const)
+                : ("nuevo" as const);
         return {
           _id: acc._id,
           folio: acc.folio,
@@ -792,9 +1141,13 @@ export const takeoutSnapshot = query({
           promisedAt: acc.promisedAt ?? null,
           totalCents: acc.totalCents,
           openedAt: acc._creationTime,
-          itemsSummary: items.map((i) => `${i.quantity} × ${i.dishName}`).join(", "),
-          hasItems: items.length > 0,
+          itemsSummary: activeItems.map((i) => `${i.quantity} × ${i.dishName}`).join(", "),
+          hasItems: activeItems.length > 0,
           hasUndelivered: summary.hasUndelivered,
+          deliverableUnits: summary.deliverableUnits,
+          deliveredUnits: summary.deliveredUnits,
+          totalUnits: summary.totalUnits,
+          isPaid,
         };
       }),
     );
@@ -1028,6 +1381,8 @@ export const submitOrder = mutation({
         dishName: line.dish.name,
         comments: line.comments,
         status: "ordered",
+        deliveredQuantity: 0,
+        inventoryConsumedQuantity: 0,
         updatedAt: now,
       });
 
@@ -1059,12 +1414,44 @@ export const submitOrder = mutation({
           orderItemId,
           stationId,
           status: "ordered",
+          startedQuantity: 0,
+          readyQuantity: 0,
           updatedAt: now,
         });
       }
     }
 
     await recalculateAccountTotal(ctx, accountId);
+    await syncAccountTableStatus(ctx, accountId, now);
+
+    // Notify ONLY the specific station roles that received items in this order.
+    const destLabel = table
+      ? table.tableNumber
+      : account?.customerName
+        ? `${account.kind === "takeaway" ? "Para llevar" : account.kind === "pickup" ? "Para recoger" : "Barra"} · ${account.customerName}`
+        : "Pedido sin mesa";
+    const itemsByRole = new Map<Doc<"preparationStations">["role"], string[]>();
+    for (const line of preparedLines) {
+      for (const area of line.areas) {
+        const role = AREA_META[area].role;
+        const list = itemsByRole.get(role) ?? [];
+        list.push(`${line.quantity} × ${line.dish.name}`);
+        itemsByRole.set(role, list);
+      }
+    }
+    for (const [role, labels] of itemsByRole) {
+      await emitNotification(ctx, {
+        organizationId: staff.organizationId,
+        locationId: staff.locationId,
+        kind: "order",
+        title: `Pedido nuevo: ${destLabel}`,
+        body: labels.join(", "),
+        targetRoles: [role],
+        accountId,
+        href: "/cuenta/cocina",
+        actionLabel: "Ver pedidos",
+      });
+    }
 
     return {
       accountId,
@@ -1118,6 +1505,242 @@ export const updateOrderItemQuantity = mutation({
   },
 });
 
+export const deliverOrderItem = mutation({
+  args: {
+    orderItemId: v.id("orderItems"),
+    quantity: v.optional(v.number()),
+  },
+  returns: v.object({
+    deliveredUnits: v.number(),
+    tableStatus: v.union(tableStatus, v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await serviceStaff(ctx);
+    const item = await ctx.db.get("orderItems", args.orderItemId);
+    if (!item || item.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos ese platillo en la cuenta.");
+    }
+    const order = await ctx.db.get("orders", item.orderId);
+    const account = order ? await ctx.db.get("accounts", order.accountId) : null;
+    if (!order || !account || account.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esta cuenta.");
+    }
+    if (account.state === "closed" || account.state === "voided") {
+      throw new ConvexError("Esta cuenta ya terminó.");
+    }
+    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+      throw new ConvexError("Esta cuenta la atiende otro mesero.");
+    }
+
+    const preps = await ctx.db
+      .query("orderItemPreparations")
+      .withIndex("by_orderItemId_and_stationId", (q) => q.eq("orderItemId", item._id))
+      .take(10);
+    const progress = computeItemProgress(item, preps);
+    if (progress.deliverableQuantity <= 0) {
+      const anyStationReady = preps.some(
+        (p) => getPrepReadyQuantity(p, item.quantity) > progress.deliveredQuantity,
+      );
+      if (anyStationReady) {
+        throw new ConvexError(
+          `${item.dishName} todavía espera a que termine otra estación para entregarse.`,
+        );
+      }
+      throw new ConvexError(`${item.dishName} todavía no tiene platillos listos para entregar.`);
+    }
+
+    const requested =
+      args.quantity !== undefined
+        ? safeInteger(args.quantity, "Cantidad a entregar", 1)
+        : progress.deliverableQuantity;
+    const deliveredUnits = Math.min(requested, progress.deliverableQuantity);
+    const nextDelivered = progress.deliveredQuantity + deliveredUnits;
+    const now = Date.now();
+
+    await ctx.db.patch("orderItems", item._id, {
+      deliveredQuantity: nextDelivered,
+      updatedAt: now,
+    });
+    for (const prep of preps) {
+      await ctx.db.patch("orderItemPreparations", prep._id, {
+        deliveredAt: now,
+        deliveredByStaffId: staff._id,
+        updatedAt: now,
+      });
+    }
+
+    await syncOrderItemStatus(ctx, item._id, now);
+    await syncOrderAndAccountTable(ctx, order._id, now);
+    const nextStatus = await syncAccountTableStatus(ctx, account._id, now);
+    return { deliveredUnits, tableStatus: nextStatus };
+  },
+});
+
+export const deliverStationItems = mutation({
+  args: {
+    accountId: v.id("accounts"),
+    stationId: v.id("preparationStations"),
+  },
+  returns: v.object({
+    deliveredCount: v.number(),
+    tableStatus: v.union(tableStatus, v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await serviceStaff(ctx);
+    const account = await ctx.db.get("accounts", args.accountId);
+    if (!account || account.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esta cuenta.");
+    }
+    if (account.state === "closed" || account.state === "voided") {
+      throw new ConvexError("Esta cuenta ya terminó.");
+    }
+    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+      throw new ConvexError("Esta cuenta la atiende otro mesero.");
+    }
+    const station = await ctx.db.get("preparationStations", args.stationId);
+    if (!station || station.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esa área de preparación.");
+    }
+
+    const now = Date.now();
+    const orders = await ctx.db
+      .query("orders")
+      .withIndex("by_accountId", (q) => q.eq("accountId", account._id))
+      .take(50);
+
+    let deliveredCount = 0;
+    let sawWaitingShared = false;
+    const touchedOrders = new Set<Id<"orders">>();
+
+    for (const order of orders) {
+      const items = await ctx.db
+        .query("orderItems")
+        .withIndex("by_orderId", (q) => q.eq("orderId", order._id))
+        .take(100);
+      for (const item of items) {
+        if (item.status === "cancelled" || getDeliveredQuantity(item) >= item.quantity) continue;
+        const preps = await ctx.db
+          .query("orderItemPreparations")
+          .withIndex("by_orderItemId_and_stationId", (q) => q.eq("orderItemId", item._id))
+          .take(10);
+        const stationPrep = preps.find((p) => p.stationId === station._id);
+        if (!stationPrep) continue;
+
+        const progress = computeItemProgress(item, preps);
+        // Shared-dish rule: only deliverable units where EVERY assigned station is ready.
+        if (progress.deliverableQuantity <= 0) {
+          if (getPrepReadyQuantity(stationPrep, item.quantity) > progress.deliveredQuantity) {
+            sawWaitingShared = true;
+          }
+          continue;
+        }
+
+        const nextDelivered = progress.deliveredQuantity + progress.deliverableQuantity;
+        await ctx.db.patch("orderItems", item._id, {
+          deliveredQuantity: nextDelivered,
+          updatedAt: now,
+        });
+        for (const prep of preps) {
+          await ctx.db.patch("orderItemPreparations", prep._id, {
+            deliveredAt: now,
+            deliveredByStaffId: staff._id,
+            updatedAt: now,
+          });
+        }
+        await syncOrderItemStatus(ctx, item._id, now);
+        touchedOrders.add(order._id);
+        deliveredCount += 1;
+      }
+    }
+
+    if (deliveredCount === 0) {
+      if (sawWaitingShared) {
+        throw new ConvexError(
+          `Los platillos compartidos de ${station.name} aún esperan a otra área para entregarse.`,
+        );
+      }
+      throw new ConvexError(`Todavía no hay productos listos para entregar en ${station.name}.`);
+    }
+
+    for (const orderId of touchedOrders) {
+      await syncOrderAndAccountTable(ctx, orderId, now);
+    }
+    const nextStatus = await syncAccountTableStatus(ctx, account._id, now);
+    return { deliveredCount, tableStatus: nextStatus };
+  },
+});
+
+export const deliverReadyItems = mutation({
+  args: { accountId: v.id("accounts") },
+  returns: v.object({
+    deliveredCount: v.number(),
+    tableStatus: v.union(tableStatus, v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await serviceStaff(ctx);
+    const account = await ctx.db.get("accounts", args.accountId);
+    if (!account || account.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esta cuenta.");
+    }
+    if (account.state === "closed" || account.state === "voided") {
+      throw new ConvexError("Esta cuenta ya terminó.");
+    }
+    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+      throw new ConvexError("Esta cuenta la atiende otro mesero.");
+    }
+
+    const now = Date.now();
+    const orders = await ctx.db
+      .query("orders")
+      .withIndex("by_accountId", (q) => q.eq("accountId", account._id))
+      .take(50);
+
+    let deliveredCount = 0;
+    const touchedOrders = new Set<Id<"orders">>();
+    for (const order of orders) {
+      const items = await ctx.db
+        .query("orderItems")
+        .withIndex("by_orderId", (q) => q.eq("orderId", order._id))
+        .take(100);
+      for (const item of items) {
+        if (item.status === "cancelled" || getDeliveredQuantity(item) >= item.quantity) continue;
+        const preps = await ctx.db
+          .query("orderItemPreparations")
+          .withIndex("by_orderItemId_and_stationId", (q) => q.eq("orderItemId", item._id))
+          .take(10);
+        const progress = computeItemProgress(item, preps);
+        if (progress.deliverableQuantity <= 0) continue;
+
+        const nextDelivered = progress.deliveredQuantity + progress.deliverableQuantity;
+        await ctx.db.patch("orderItems", item._id, {
+          deliveredQuantity: nextDelivered,
+          updatedAt: now,
+        });
+        for (const prep of preps) {
+          await ctx.db.patch("orderItemPreparations", prep._id, {
+            deliveredAt: now,
+            deliveredByStaffId: staff._id,
+            updatedAt: now,
+          });
+        }
+        await syncOrderItemStatus(ctx, item._id, now);
+        touchedOrders.add(order._id);
+        deliveredCount += progress.deliverableQuantity;
+      }
+    }
+
+    if (deliveredCount === 0) {
+      throw new ConvexError("Todavía no hay productos listos para entregar en esta cuenta.");
+    }
+
+    for (const orderId of touchedOrders) {
+      await syncOrderAndAccountTable(ctx, orderId, now);
+    }
+    const nextStatus = await syncAccountTableStatus(ctx, account._id, now);
+    return { deliveredCount, tableStatus: nextStatus };
+  },
+});
+
 export const markAccountDelivered = mutation({
   args: { accountId: v.id("accounts") },
   returns: v.object({ deliveredCount: v.number() }),
@@ -1147,17 +1770,26 @@ export const markAccountDelivered = mutation({
         .withIndex("by_orderId", (q) => q.eq("orderId", order._id))
         .take(100);
       for (const item of items) {
-        if (item.status === "delivered") continue;
+        if (item.status === "cancelled" || getDeliveredQuantity(item) >= item.quantity) continue;
         const preps = await ctx.db
           .query("orderItemPreparations")
           .withIndex("by_orderItemId_and_stationId", (q) => q.eq("orderItemId", item._id))
           .take(10);
         for (const prep of preps) {
-          if (prep.status !== "ready") {
-            await ctx.db.patch("orderItemPreparations", prep._id, { status: "ready", updatedAt: now });
-          }
+          await ctx.db.patch("orderItemPreparations", prep._id, {
+            status: "delivered",
+            startedQuantity: item.quantity,
+            readyQuantity: item.quantity,
+            deliveredAt: now,
+            deliveredByStaffId: staff._id,
+            updatedAt: now,
+          });
         }
-        await ctx.db.patch("orderItems", item._id, { status: "delivered", updatedAt: now });
+        await ctx.db.patch("orderItems", item._id, {
+          status: "delivered",
+          deliveredQuantity: item.quantity,
+          updatedAt: now,
+        });
         deliveredCount += 1;
       }
       if (order.status !== "delivered") {
@@ -1165,12 +1797,234 @@ export const markAccountDelivered = mutation({
       }
     }
 
-    if (account.diningTableId && account.state === "open") {
-      await ctx.db.patch("diningTables", account.diningTableId, { status: "occupied" });
-    }
-    await ctx.db.patch("accounts", account._id, { updatedAt: now });
-
+    await syncAccountTableStatus(ctx, account._id, now);
     return { deliveredCount };
+  },
+});
+
+export const cancelOrderItem = mutation({
+  args: {
+    orderItemId: v.id("orderItems"),
+    reason: v.string(),
+    inventoryAction: v.optional(v.union(v.literal("none"), v.literal("return"), v.literal("waste"))),
+  },
+  returns: v.object({
+    inventoryAction: v.union(v.literal("none"), v.literal("return"), v.literal("waste")),
+    notifiedKitchen: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await serviceStaff(ctx);
+    const reason = requiredText(args.reason, "Motivo de cancelación", 160);
+    const item = await ctx.db.get("orderItems", args.orderItemId);
+    if (!item || item.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos ese platillo en la cuenta.");
+    }
+    if (item.status === "cancelled") {
+      throw new ConvexError("Este platillo ya fue cancelado.");
+    }
+    const order = await ctx.db.get("orders", item.orderId);
+    const account = order ? await ctx.db.get("accounts", order.accountId) : null;
+    if (!order || !account || account.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos la cuenta de este platillo.");
+    }
+    if (account.state === "closed" || account.state === "voided") {
+      throw new ConvexError("No puedes cancelar platillos en una cuenta cerrada.");
+    }
+    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+      throw new ConvexError("Esta cuenta la atiende otro mesero.");
+    }
+
+    const now = Date.now();
+    const consumed = getInventoryConsumedQuantity(item);
+    let finalAction: "none" | "return" | "waste" = "none";
+    if (consumed > 0) {
+      finalAction = args.inventoryAction === "waste" ? "waste" : "return";
+      const modifiers = await ctx.db
+        .query("orderItemModifiers")
+        .withIndex("by_orderItemId", (q) => q.eq("orderItemId", item._id))
+        .take(50);
+      await reconcileCancelledRecipe(
+        ctx,
+        staff,
+        item.dishId,
+        consumed,
+        `cancel:${item._id}`,
+        finalAction,
+        reason,
+        modifiers,
+      );
+    }
+
+    await ctx.db.patch("orderItems", item._id, {
+      status: "cancelled",
+      cancelledAt: now,
+      cancelledByStaffId: staff._id,
+      cancelReason: reason,
+      cancelInventoryAction: finalAction,
+      updatedAt: now,
+    });
+
+    const preps = await ctx.db
+      .query("orderItemPreparations")
+      .withIndex("by_orderItemId_and_stationId", (q) => q.eq("orderItemId", item._id))
+      .take(10);
+
+    const notifiedRoles = new Set<Doc<"preparationStations">["role"]>();
+    for (const prep of preps) {
+      const wasStarted = getPrepStartedQuantity(prep, item.quantity) > 0;
+      const station = await ctx.db.get("preparationStations", prep.stationId);
+      await ctx.db.patch("orderItemPreparations", prep._id, {
+        status: "cancelled",
+        // If station already started preparing, keep unacknowledged so it shows NO PREPARAR!
+        cancelAcknowledgedAt: wasStarted ? undefined : now,
+        updatedAt: now,
+      });
+      if (wasStarted && station) {
+        notifiedRoles.add(resolveStationRole(station));
+      }
+    }
+
+    await recalculateAccountTotal(ctx, account._id);
+    await syncOrderAndAccountTable(ctx, order._id, now);
+
+    if (notifiedRoles.size > 0) {
+      const table = account.diningTableId ? await ctx.db.get("diningTables", account.diningTableId) : null;
+      const destLabel = table?.tableNumber ?? account.customerName ?? `Folio A-${String(account.folio).padStart(4, "0")}`;
+      await emitNotification(ctx, {
+        organizationId: staff.organizationId,
+        locationId: staff.locationId,
+        kind: "cancel",
+        title: `No preparar: ${item.quantity} × ${item.dishName}`,
+        body: `${destLabel} · Motivo: ${reason}`,
+        targetRoles: [...notifiedRoles],
+        accountId: account._id,
+        href: "/cuenta/cocina",
+        actionLabel: "Ver pedidos",
+      });
+    }
+
+    return {
+      inventoryAction: finalAction,
+      notifiedKitchen: notifiedRoles.size > 0,
+    };
+  },
+});
+
+export const reassignAccountWaiter = mutation({
+  args: {
+    accountId: v.id("accounts"),
+    targetStaffId: v.id("staff"),
+    reason: v.optional(v.string()),
+  },
+  returns: v.object({ assignedStaffName: v.string() }),
+  handler: async (ctx, args) => {
+    const staff = await serviceStaff(ctx);
+    const account = await ctx.db.get("accounts", args.accountId);
+    if (!account || account.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esta cuenta.");
+    }
+    if (account.state === "closed" || account.state === "voided") {
+      throw new ConvexError("No puedes reasignar una cuenta cerrada.");
+    }
+    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+      throw new ConvexError("Esta cuenta la atiende otro mesero.");
+    }
+
+    const target = await ctx.db.get("staff", args.targetStaffId);
+    if (
+      !target ||
+      !target.isActive ||
+      target.locationId !== staff.locationId ||
+      !target.roles.includes("waiter")
+    ) {
+      throw new ConvexError("Selecciona un mesero activo de esta sucursal.");
+    }
+
+    const now = Date.now();
+    await ctx.db.insert("accountAssignments", {
+      organizationId: staff.organizationId,
+      locationId: staff.locationId,
+      accountId: account._id,
+      previousStaffId: account.assignedStaffId,
+      assignedStaffId: target._id,
+      changedByStaffId: staff._id,
+      reason: args.reason?.trim().slice(0, 140) || undefined,
+    });
+    await ctx.db.patch("accounts", account._id, {
+      assignedStaffId: target._id,
+      updatedAt: now,
+    });
+    if (account.diningTableId) {
+      const table = await ctx.db.get("diningTables", account.diningTableId);
+      if (table && table.currentAccountId === account._id) {
+        await ctx.db.patch("diningTables", table._id, { assignedStaffId: target._id });
+      }
+    }
+
+    if (target._id !== staff._id) {
+      const table = account.diningTableId ? await ctx.db.get("diningTables", account.diningTableId) : null;
+      const label = table?.tableNumber ?? account.customerName ?? `Folio A-${String(account.folio).padStart(4, "0")}`;
+      await emitNotification(ctx, {
+        organizationId: staff.organizationId,
+        locationId: staff.locationId,
+        kind: "reassign",
+        title: `Te asignaron ${label}`,
+        body: `Cuenta A-${String(account.folio).padStart(4, "0")} transferida por ${staff.displayName}.`,
+        targetStaffId: target._id,
+        accountId: account._id,
+        href: `/cuenta/mesero/cuenta/${account._id}`,
+        actionLabel: "Abrir cuenta",
+      });
+    }
+
+    return { assignedStaffName: target.displayName };
+  },
+});
+
+export const confirmPayment = mutation({
+  args: { accountId: v.id("accounts") },
+  returns: v.object({
+    folio: v.number(),
+    totalCents: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await serviceStaff(ctx);
+    const account = await ctx.db.get("accounts", args.accountId);
+    if (!account || account.locationId !== staff.locationId) {
+      throw new ConvexError("No encontramos esta cuenta.");
+    }
+    if (account.state === "closed" || account.state === "voided") {
+      throw new ConvexError("Esta cuenta ya está cerrada.");
+    }
+    if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
+      throw new ConvexError("Esta cuenta la atiende otro mesero.");
+    }
+
+    const items = await loadAccountItems(ctx, account._id);
+    const activeItems = items.filter((i) => i.status !== "cancelled");
+    if (activeItems.length === 0) {
+      throw new ConvexError("Esta cuenta no tiene productos para cobrar. Puedes anularla desde Más acciones.");
+    }
+
+    const now = Date.now();
+    await ctx.db.patch("accounts", account._id, {
+      state: "closed",
+      closedAt: now,
+      updatedAt: now,
+    });
+
+    if (account.diningTableId) {
+      const table = await ctx.db.get("diningTables", account.diningTableId);
+      if (table && table.currentAccountId === account._id) {
+        await ctx.db.patch("diningTables", table._id, {
+          currentAccountId: undefined,
+          assignedStaffId: undefined,
+          status: "empty",
+        });
+      }
+    }
+
+    return { folio: account.folio, totalCents: account.totalCents };
   },
 });
 
@@ -1190,7 +2044,8 @@ export const requestBill = mutation({
       throw new ConvexError("Esta cuenta la atiende otro mesero.");
     }
     const items = await loadAccountItems(ctx, account._id);
-    if (items.length === 0) {
+    const activeItems = items.filter((i) => i.status !== "cancelled");
+    if (activeItems.length === 0) {
       throw new ConvexError("La cuenta todavía no tiene productos.");
     }
     const now = Date.now();
@@ -1202,6 +2057,19 @@ export const requestBill = mutation({
     if (account.diningTableId) {
       await ctx.db.patch("diningTables", account.diningTableId, { status: "payment" });
     }
+    const table = account.diningTableId ? await ctx.db.get("diningTables", account.diningTableId) : null;
+    const label = table?.tableNumber ?? account.customerName ?? `Folio A-${String(account.folio).padStart(4, "0")}`;
+    await emitNotification(ctx, {
+      organizationId: staff.organizationId,
+      locationId: staff.locationId,
+      kind: "bill",
+      title: `${label} quiere pagar`,
+      body: `Folio A-${String(account.folio).padStart(4, "0")} · ${(account.totalCents / 100).toLocaleString("es-MX", { style: "currency", currency: "MXN" })}`,
+      targetRoles: ["owner", "manager", "cashier"],
+      accountId: account._id,
+      href: `/cuenta/mesero/cuenta/${account._id}`,
+      actionLabel: "Abrir cuenta",
+    });
     return null;
   },
 });
@@ -1221,14 +2089,13 @@ export const reopenForOrdering = mutation({
     if (!isManagerOrOwner(staff) && account.assignedStaffId && account.assignedStaffId !== staff._id) {
       throw new ConvexError("Esta cuenta la atiende otro mesero.");
     }
+    const now = Date.now();
     await ctx.db.patch("accounts", account._id, {
       state: "open",
       billRequestedAt: undefined,
-      updatedAt: Date.now(),
+      updatedAt: now,
     });
-    if (account.diningTableId) {
-      await ctx.db.patch("diningTables", account.diningTableId, { status: "occupied" });
-    }
+    await syncAccountTableStatus(ctx, account._id, now);
     return null;
   },
 });
@@ -1249,7 +2116,8 @@ export const voidEmptyAccount = mutation({
       throw new ConvexError("Esta cuenta la atiende otro mesero.");
     }
     const items = await loadAccountItems(ctx, account._id);
-    if (items.length > 0) {
+    const activeItems = items.filter((i) => i.status !== "cancelled");
+    if (activeItems.length > 0) {
       throw new ConvexError("Esta cuenta ya tiene productos enviados.");
     }
     const now = Date.now();
@@ -1304,16 +2172,18 @@ export const moveAccountToTable = mutation({
         status: "empty",
       });
     }
+    const now = Date.now();
     await ctx.db.patch("accounts", account._id, {
       diningTableId: target._id,
       sectionId: target.sectionId,
-      updatedAt: Date.now(),
+      updatedAt: now,
     });
     await ctx.db.patch("diningTables", target._id, {
       currentAccountId: account._id,
       status: account.state === "awaiting_payment" ? "payment" : "occupied",
       assignedStaffId: account.assignedStaffId,
     });
+    await syncAccountTableStatus(ctx, account._id, now);
     return null;
   },
 });

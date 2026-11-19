@@ -1,8 +1,8 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import {
-  accountState, canvas, inventoryKind, orderStatus, preparationArea, preparationStatus,
-  staffRole, submissionState, tableShape,
+  accountState, canvas, inventoryKind, notificationKind, orderStatus, preparationArea, preparationStatus,
+  staffRole, stationRole, submissionState, tableShape, tableStatus,
 } from "./model/validators";
 
 const organization = { organizationId: v.id("organizations") };
@@ -112,7 +112,7 @@ export default defineSchema({
   diningTables: defineTable({
     ...scope, sectionId: v.id("sections"), tableTypeId: v.optional(v.id("tableTypes")),
     tableNumber: v.string(), seatCount: v.number(), shape: tableShape, canvas,
-    status: v.union(v.literal("empty"), v.literal("occupied"), v.literal("attended"), v.literal("payment")),
+    status: tableStatus,
     isActive: v.boolean(), qrToken: v.string(), qrEnabled: v.boolean(), qrCreatedAt: v.number(),
     qrVersion: v.optional(v.number()),
     assignedStaffId: v.optional(v.id("staff")), currentAccountId: v.optional(v.id("accounts")),
@@ -128,7 +128,8 @@ export default defineSchema({
   }).index("by_sectionId_and_startsAt", ["sectionId", "startsAt"]),
   preparationStations: defineTable({
     ...scope, name: v.string(), isActive: v.boolean(), responsibleStaffId: v.optional(v.id("staff")),
-    role: v.union(v.literal("chef"), v.literal("bartender"), v.literal("barista")),
+    role: stationRole,
+    area: v.optional(preparationArea),
   }).index("by_locationId_and_name", ["locationId", "name"]),
   dishStations: defineTable({
     ...scope, dishId: v.id("dishes"), stationId: v.id("preparationStations"),
@@ -164,11 +165,23 @@ export default defineSchema({
     unitPriceCents: v.number(), dishName: v.string(), comments: v.optional(v.string()),
     status: orderStatus, updatedAt: v.number(), guestOrderItemId: v.optional(v.id("guestOrderItems")),
     inventoryConsumedAt: v.optional(v.number()),
+    inventoryConsumedQuantity: v.optional(v.number()),
+    deliveredQuantity: v.optional(v.number()),
+    cancelledAt: v.optional(v.number()),
+    cancelledByStaffId: v.optional(v.id("staff")),
+    cancelReason: v.optional(v.string()),
+    cancelInventoryAction: v.optional(v.union(v.literal("none"), v.literal("return"), v.literal("waste"))),
   }).index("by_orderId", ["orderId"]).index("by_guestOrderItemId", ["guestOrderItemId"]),
   orderItemPreparations: defineTable({
     ...scope, orderItemId: v.id("orderItems"), stationId: v.id("preparationStations"),
     status: preparationStatus, updatedAt: v.number(), startedAt: v.optional(v.number()),
     startedByStaffId: v.optional(v.id("staff")),
+    startedQuantity: v.optional(v.number()),
+    readyQuantity: v.optional(v.number()),
+    readyAt: v.optional(v.number()),
+    deliveredAt: v.optional(v.number()),
+    deliveredByStaffId: v.optional(v.id("staff")),
+    cancelAcknowledgedAt: v.optional(v.number()),
   }).index("by_orderItemId_and_stationId", ["orderItemId", "stationId"])
     .index("by_locationId_and_status", ["locationId", "status"]),
   orderItemModifiers: defineTable({
@@ -232,4 +245,18 @@ export default defineSchema({
     acknowledgedAt: v.optional(v.number()), resolvedAt: v.optional(v.number()),
   }).index("by_locationId_and_state", ["locationId", "state"])
     .index("by_locationId_and_requestId", ["locationId", "requestId"]),
+
+  notifications: defineTable({
+    ...scope,
+    kind: notificationKind,
+    title: v.string(),
+    body: v.string(),
+    targetStaffId: v.optional(v.id("staff")),
+    targetRoles: v.array(staffRole),
+    accountId: v.optional(v.id("accounts")),
+    href: v.optional(v.string()),
+    actionLabel: v.optional(v.string()),
+    readByStaffIds: v.array(v.id("staff")),
+    createdAt: v.number(),
+  }).index("by_locationId_and_createdAt", ["locationId", "createdAt"]),
 });

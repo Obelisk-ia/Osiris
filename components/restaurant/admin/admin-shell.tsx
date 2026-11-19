@@ -6,6 +6,7 @@ import {
   BookOpen,
   Building2,
   Check,
+  ChefHat,
   ChevronsUpDown,
   Copy,
   Grid2x2,
@@ -27,6 +28,7 @@ import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
 import { formatRoles, type StaffRole } from "@/lib/restaurant-roles";
 import { errorMessage, formatShortDate, initials, toRoman } from "@/lib/format";
+import { NotificationsBell } from "@/components/restaurant/notifications-bell";
 import { AdminModal, ConfirmModal } from "./admin-ui";
 
 export type AdminNavItem = {
@@ -38,6 +40,7 @@ export type AdminNavItem = {
 
 export const ADMIN_NAV_ITEMS: readonly AdminNavItem[] = [
   { id: "mesas", label: "Mesas", href: "/cuenta/mesas", icon: Grid2x2 },
+  { id: "cocina", label: "Cocina", href: "/cuenta/cocina", icon: ChefHat },
   { id: "inventario", label: "Inventario", href: "/cuenta/administracion/inventario", icon: Package },
   { id: "menu", label: "Menú", href: "/cuenta/administracion/menu", icon: BookOpen },
   { id: "buffet", label: "Buffet", href: "/cuenta/administracion/buffet", icon: UtensilsCrossed },
@@ -296,6 +299,7 @@ export function AdminShell({
           <i aria-hidden="true" />
           {isOwner ? "Dueño" : "Gerente"}
         </span>
+        <NotificationsBell canQuery={canQuery} />
         <button
           type="button"
           className="az-only-mobile inline-flex items-center justify-center rounded-full"

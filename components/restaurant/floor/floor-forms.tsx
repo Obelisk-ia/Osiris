@@ -163,6 +163,7 @@ export function TableForm({ table, sections, types, defaultName, defaultSectionI
             }}>
             <option value="empty">Libre</option>
             <option value="occupied">Ocupada</option>
+            <option value="partial">Entrega parcial</option>
             <option value="attended">Pedido listo</option>
             <option value="payment">Quieren pagar</option>
           </select>
