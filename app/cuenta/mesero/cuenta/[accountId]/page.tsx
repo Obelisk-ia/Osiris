@@ -14,7 +14,7 @@ async function AccountOrderContent({ params }: { params: Promise<{ accountId: st
   const isAdmin = registration.staff.roles.some((role) => role === "owner" || role === "manager");
   const isWaiter = registration.staff.roles.includes("waiter");
   const isCashier = registration.staff.roles.includes("cashier");
-  const returnHref = !isAdmin && isCashier && !isWaiter ? "/cuenta/caja" : "/cuenta/mesas";
+  const returnHref = !isAdmin && isCashier && !isWaiter ? "/cuenta/caja" : undefined;
   const preloaded = await preloadQuery(
     api.waiter.orderWorkspace,
     { accountId: accountId as Id<"accounts"> },
