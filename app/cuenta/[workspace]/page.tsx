@@ -5,6 +5,8 @@ import { api } from "@/convex/_generated/api";
 import { Brand } from "@/components/brand";
 import { AdminShell } from "@/components/restaurant/admin/admin-shell";
 import { FloorPanel } from "@/components/restaurant/floor/floor-panel";
+import { KitchenPanel } from "@/components/restaurant/kitchen/kitchen-panel";
+import { KitchenShell } from "@/components/restaurant/kitchen/kitchen-shell";
 import { WaiterShell } from "@/components/restaurant/waiter/waiter-shell";
 import { WaiterTablesPanel } from "@/components/restaurant/waiter/waiter-tables-panel";
 import { WorkspacePanel } from "@/components/restaurant/workspace-panel";
@@ -47,6 +49,32 @@ async function WorkspaceContent({ params }: { params: Promise<{ workspace: strin
       >
         <WaiterTablesPanel preloaded={waiterTables} />
       </WaiterShell>
+    );
+  }
+
+  if (definition.value === "cocina") {
+    const kitchen = await preloadQuery(api.kitchen.snapshot, {}, options);
+    if (isAdmin) {
+      return (
+        <AdminShell
+          initialRestaurantName={registration.restaurant.name}
+          initialLocationName={registration.location.name}
+          initialStaffName={registration.staff.displayName}
+          initialRoles={registration.staff.roles as StaffRole[]}
+        >
+          <KitchenPanel preloaded={kitchen} />
+        </AdminShell>
+      );
+    }
+    return (
+      <KitchenShell
+        initialRestaurantName={registration.restaurant.name}
+        initialLocationName={registration.location.name}
+        initialStaffName={registration.staff.displayName}
+        initialRoles={registration.staff.roles as StaffRole[]}
+      >
+        <KitchenPanel preloaded={kitchen} />
+      </KitchenShell>
     );
   }
 

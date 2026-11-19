@@ -35,7 +35,13 @@ export const snapshot = query({
           q.eq("locationId", staff.locationId).eq("assignedStaffId", staff._id).eq("isActive", true)).take(50)
         : await ctx.db.query("diningTables").withIndex("by_locationId_and_isActive", (q) =>
           q.eq("locationId", staff.locationId).eq("isActive", true)).take(50);
-      const statuses = { empty: "Libre", occupied: "Ocupada", attended: "Atendida", payment: "Solicita pago" };
+      const statuses = {
+        empty: "Libre",
+        occupied: "Ocupada",
+        partial: "Entrega parcial",
+        attended: "Pedido listo",
+        payment: "Quieren pagar",
+      };
       for (const table of tables) items.push({
         id: table._id, title: table.tableNumber, detail: statuses[table.status],
       });

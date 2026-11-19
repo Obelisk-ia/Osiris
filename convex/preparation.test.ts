@@ -67,20 +67,44 @@ describe("preparation-time inventory consumption", () => {
     expect(state.movements[0].quantityDeltaMicros).toBe(-20 * UNIT);
   });
 
-  it("rolls back all ingredients and status updates when any ingredient is insufficient", async () => {
+  it("allows inventory to go negative on preparation start and still rolls back on invalid ingredients", async () => {
     const f = await fixture();
-    await f.t.run(async (ctx) => {
+    const saltId = await f.t.run(async (ctx) => {
       const itemId = await ctx.db.insert("inventoryItems", { organizationId: f.scope.organizationId, name: "Sal", unit: "g", isActive: true });
       await ctx.db.insert("recipeIngredients", { organizationId: f.scope.organizationId, dishId: f.dishId, inventoryItemId: itemId, quantityMicros: UNIT });
       await ctx.db.insert("inventoryBalances", { ...f.scope, inventoryItemId: itemId, quantityMicros: 0, updatedAt: Date.now() });
+      return itemId;
     });
-    await expect(f.owner.mutation(internal.preparation.startOrderPreparation, { preparationId: f.preparationId })).rejects.toThrow(/insuficiente/);
-    const state = await f.t.run(async (ctx) => ({
-      balance: await ctx.db.get("inventoryBalances", f.balanceId),
+    await f.owner.mutation(internal.preparation.startOrderPreparation, { preparationId: f.preparationId });
+    const afterStart = await f.t.run(async (ctx) => ({
+      flour: await ctx.db.get("inventoryBalances", f.balanceId),
+      salt: await ctx.db
+        .query("inventoryBalances")
+        .withIndex("by_locationId_and_inventoryItemId", (q) =>
+          q.eq("locationId", f.scope.locationId).eq("inventoryItemId", saltId),
+        )
+        .unique(),
       preparation: await ctx.db.get("orderItemPreparations", f.preparationId),
       item: await ctx.db.get("orderItems", f.itemId),
+    }));
+    expect(afterStart.flour?.quantityMicros).toBe(80 * UNIT);
+    expect(afterStart.salt?.quantityMicros).toBe(-2 * UNIT);
+    expect(afterStart.preparation?.status).toBe("preparing");
+    expect(afterStart.item?.inventoryConsumedAt).toBeDefined();
+
+    // Inactive ingredient must still roll back everything atomically.
+    const f2 = await fixture();
+    await f2.t.run(async (ctx) => {
+      const inactiveId = await ctx.db.insert("inventoryItems", { organizationId: f2.scope.organizationId, name: "Desactivado", unit: "g", isActive: false });
+      await ctx.db.insert("recipeIngredients", { organizationId: f2.scope.organizationId, dishId: f2.dishId, inventoryItemId: inactiveId, quantityMicros: UNIT });
+    });
+    await expect(f2.owner.mutation(internal.preparation.startOrderPreparation, { preparationId: f2.preparationId })).rejects.toThrow(/no está disponible/);
+    const state = await f2.t.run(async (ctx) => ({
+      balance: await ctx.db.get("inventoryBalances", f2.balanceId),
+      preparation: await ctx.db.get("orderItemPreparations", f2.preparationId),
+      item: await ctx.db.get("orderItems", f2.itemId),
       movements: await ctx.db.query("inventoryMovements")
-        .withIndex("by_locationId_and_inventoryItemId", (q) => q.eq("locationId", f.scope.locationId)).take(5),
+        .withIndex("by_locationId_and_inventoryItemId", (q) => q.eq("locationId", f2.scope.locationId)).take(5),
     }));
     expect(state.balance?.quantityMicros).toBe(100 * UNIT);
     expect(state.preparation?.status).toBe("ordered");
@@ -143,12 +167,15 @@ describe("preparation-time inventory consumption", () => {
     expect(state.movements[0].recipePortions).toBe(3);
   });
 
-  it("rejects buffet preparation without enough stock or for an inactive menu", async () => {
+  it("allows negative stock on buffet batches while still rejecting an inactive menu", async () => {
     const f = await fixture(20 * UNIT);
-    await expect(f.owner.mutation(internal.preparation.startBuffetBatch, { batchId: f.batchId })).rejects.toThrow(/insuficiente/);
-    expect((await f.t.run(async (ctx) => ctx.db.get("buffetBatches", f.batchId)))?.status).toBe("ordered");
-    await f.t.run(async (ctx) => ctx.db.patch("buffetMenus", f.menuId, { isActive: false }));
-    await expect(f.owner.mutation(internal.preparation.startBuffetBatch, { batchId: f.batchId })).rejects.toThrow(/no está disponible/);
+    await f.owner.mutation(internal.preparation.startBuffetBatch, { batchId: f.batchId });
+    expect((await f.t.run(async (ctx) => ctx.db.get("inventoryBalances", f.balanceId)))?.quantityMicros).toBe(-10 * UNIT);
+    expect((await f.t.run(async (ctx) => ctx.db.get("buffetBatches", f.batchId)))?.status).toBe("preparing");
+
+    const f2 = await fixture(20 * UNIT);
+    await f2.t.run(async (ctx) => ctx.db.patch("buffetMenus", f2.menuId, { isActive: false }));
+    await expect(f2.owner.mutation(internal.preparation.startBuffetBatch, { batchId: f2.batchId })).rejects.toThrow(/no está disponible/);
   });
 
   it("rejects fractional or unsafe inventory arithmetic and closed accounts", async () => {

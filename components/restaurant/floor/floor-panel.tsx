@@ -15,7 +15,7 @@ import { TableShape } from "./table-shape";
 
 type Section = Doc<"sections"> & { assignedStaffId: Id<"staff"> | null; tableCount: number };
 type Table = Doc<"diningTables"> & {
-  status: "empty" | "occupied" | "attended" | "payment";
+  status: "empty" | "occupied" | "partial" | "attended" | "payment";
   typeName: string | null;
 };
 type TableType = Doc<"tableTypes">;
@@ -35,6 +35,7 @@ type SectionDrag = { id: Id<"sections">; canvas: Canvas };
 const STATUS_META = {
   empty: { label: "Libre", className: "empty" },
   occupied: { label: "Ocupada", className: "occupied" },
+  partial: { label: "Entrega parcial", className: "partial" },
   attended: { label: "Pedido listo", className: "attended" },
   payment: { label: "Quieren pagar", className: "payment" },
 } as const;
@@ -43,6 +44,7 @@ const FILTERS: Array<{ key: "all" | StatusKey; label: string }> = [
   { key: "all", label: "Todas" },
   { key: "empty", label: "Libres" },
   { key: "occupied", label: "Ocupadas" },
+  { key: "partial", label: "Entrega parcial" },
   { key: "attended", label: "Pedido listo" },
   { key: "payment", label: "Quieren pagar" },
 ];
@@ -195,7 +197,7 @@ export function FloorPanel({
       acc[table.status] += 1;
       return acc;
     },
-    { empty: 0, occupied: 0, attended: 0, payment: 0 },
+    { empty: 0, occupied: 0, partial: 0, attended: 0, payment: 0 },
   );
 
   function act(run: () => Promise<unknown>): Promise<void> {

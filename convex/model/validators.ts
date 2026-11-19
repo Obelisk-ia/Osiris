@@ -1,14 +1,31 @@
 import { v } from "convex/values";
 
 export const operationalRole = v.union(
-  v.literal("waiter"), v.literal("chef"), v.literal("bartender"),
+  v.literal("waiter"), v.literal("chef"), v.literal("bar"), v.literal("bartender"),
   v.literal("barista"), v.literal("cashier"),
+);
+export const stationRole = v.union(
+  v.literal("chef"), v.literal("bar"), v.literal("bartender"), v.literal("barista"),
 );
 export const staffRole = v.union(v.literal("owner"), v.literal("manager"), operationalRole);
 export const orderStatus = v.union(
-  v.literal("ordered"), v.literal("preparing"), v.literal("ready"), v.literal("delivered"),
+  v.literal("ordered"), v.literal("preparing"), v.literal("ready"), v.literal("delivered"), v.literal("cancelled"),
 );
-export const preparationStatus = v.union(v.literal("ordered"), v.literal("preparing"), v.literal("ready"));
+export const preparationStatus = v.union(
+  v.literal("ordered"), v.literal("preparing"), v.literal("ready"), v.literal("delivered"), v.literal("cancelled"),
+);
+export const notificationKind = v.union(
+  v.literal("ready"),
+  v.literal("order"),
+  v.literal("cancel"),
+  v.literal("bill"),
+  v.literal("reassign"),
+  v.literal("late"),
+  v.literal("info"),
+);
+export const tableStatus = v.union(
+  v.literal("empty"), v.literal("occupied"), v.literal("partial"), v.literal("attended"), v.literal("payment"),
+);
 export const accountState = v.union(
   v.literal("open"), v.literal("awaiting_payment"), v.literal("closed"), v.literal("voided"),
 );

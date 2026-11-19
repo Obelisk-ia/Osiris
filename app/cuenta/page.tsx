@@ -18,14 +18,28 @@ async function AccountContent() {
   const preloaded = await preloadQuery(api.users.current, {}, options);
   if (!preloadedQueryResult(preloaded)?.staffId) redirect("/crear-cuenta");
 
-  // Owners, managers, and waiters use the Atelier Zero sidebar shell directly
-  // instead of the intermediate workspace hub.
+  // Owners, managers, waiters, and preparation station staff use their Atelier
+  // Zero sidebar shell directly instead of the intermediate workspace hub.
   const registration = await fetchQuery(api.restaurants.current, {}, options);
-  if (
-    registration?.staff.isActive &&
-    registration.staff.roles.some((role) => role === "owner" || role === "manager" || role === "waiter")
-  ) {
-    redirect("/cuenta/mesas");
+  if (registration?.staff.isActive) {
+    if (
+      registration.staff.roles.some(
+        (role) => role === "owner" || role === "manager" || role === "waiter",
+      )
+    ) {
+      redirect("/cuenta/mesas");
+    }
+    if (
+      registration.staff.roles.some(
+        (role) =>
+          role === "chef" ||
+          role === "bar" ||
+          role === "bartender" ||
+          role === "barista",
+      )
+    ) {
+      redirect("/cuenta/cocina");
+    }
   }
 
   return <AccountPanel preloaded={preloaded} />;

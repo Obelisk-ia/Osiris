@@ -4,9 +4,9 @@ import { useMutation, usePreloadedQuery, type Preloaded } from "convex/react";
 import {
   ArrowLeft,
   ArrowLeftRight,
+  BadgeCheck,
   Ban,
   Check,
-  Clock,
   Edit3,
   Minus,
   MoreVertical,
@@ -15,11 +15,11 @@ import {
   Search,
   Send,
   Undo2,
+  UserCheck,
   Utensils,
 } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
@@ -30,12 +30,14 @@ import {
   useToast,
 } from "@/components/restaurant/admin/admin-ui";
 import { Button } from "@/components/ui/button";
+import { loadStoredDraft, saveStoredDraft } from "@/lib/draft-storage";
 import { errorMessage, formatDateTime, formatMoney } from "@/lib/format";
-import { OrderProgressBar } from "./waiter-tables-panel";
+import { OrderProgressBar, PlatesProgressList } from "./waiter-tables-panel";
 
 type Workspace = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.waiter.orderWorkspace>>>;
 type MenuDish = Workspace["dishes"][number];
 type ModifierGroup = Workspace["modifierGroups"][number];
+type AccountItem = NonNullable<Workspace["account"]>["items"][number];
 
 type DraftModifier = {
   optionId: Id<"modifierOptions">;
@@ -59,13 +61,6 @@ const ACCOUNT_KIND_LABELS = {
   takeaway: "Para llevar",
   pickup: "Para recoger",
   counter: "Barra",
-} as const;
-
-const ITEM_STAGE_META = {
-  ordered: { label: "Enviado a cocina", cls: "" },
-  preparing: { label: "Preparando", cls: "accent" },
-  ready: { label: "Listo para entregar", cls: "success" },
-  delivered: { label: "Entregado", cls: "success" },
 } as const;
 
 function draftLineTotal(line: DraftLine): number {
@@ -95,24 +90,45 @@ export function OrderPanel({
 
   const submitOrder = useMutation(api.waiter.submitOrder);
   const updateItemQty = useMutation(api.waiter.updateOrderItemQuantity);
+  const cancelOrderItem = useMutation(api.waiter.cancelOrderItem);
+  const reassignWaiter = useMutation(api.waiter.reassignAccountWaiter);
+  const deliverOrderItem = useMutation(api.waiter.deliverOrderItem);
+  const deliverReady = useMutation(api.waiter.deliverReadyItems);
   const markDelivered = useMutation(api.waiter.markAccountDelivered);
   const requestBill = useMutation(api.waiter.requestBill);
+  const confirmPayment = useMutation(api.waiter.confirmPayment);
   const reopenForOrdering = useMutation(api.waiter.reopenForOrdering);
   const voidEmptyAccount = useMutation(api.waiter.voidEmptyAccount);
   const moveAccountToTable = useMutation(api.waiter.moveAccountToTable);
 
+  const storageId = data.account?._id
+    ? String(data.account._id)
+    : data.table?._id
+      ? String(data.table._id)
+      : undefined;
+
   const [mobileTab, setMobileTab] = useState<"menu" | "cuenta">(data.canTakeOrder ? "menu" : "cuenta");
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
-  const [draft, setDraft] = useState<DraftLine[]>([]);
+  const [draft, setDraft] = useState<DraftLine[]>(() => loadStoredDraft<DraftLine>(storageId));
+
+  useEffect(() => {
+    saveStoredDraft(storageId, draft);
+  }, [storageId, draft]);
 
   const [pickingDish, setPickingDish] = useState<MenuDish | null>(null);
   const [editingNoteLine, setEditingNoteLine] = useState<DraftLine | null>(null);
+  const [cancellingItem, setCancellingItem] = useState<AccountItem | null>(null);
   const [confirmSendOpen, setConfirmSendOpen] = useState(false);
   const [moreActionsOpen, setMoreActionsOpen] = useState(false);
   const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [reassignModalOpen, setReassignModalOpen] = useState(false);
+  const [billWarningOpen, setBillWarningOpen] = useState(false);
+  const [leaveDraftOpen, setLeaveDraftOpen] = useState(false);
   const [voidConfirmOpen, setVoidConfirmOpen] = useState(false);
+  const [payConfirmOpen, setPayConfirmOpen] = useState(false);
   const [actionPending, setActionPending] = useState(false);
+  const [busyItemId, setBusyItemId] = useState<Id<"orderItems"> | null>(null);
 
   const modifierGroupMap = useMemo(
     () => new Map(data.modifierGroups.map((g) => [g._id, g] as const)),
@@ -204,9 +220,9 @@ export function OrderPanel({
   const draftCount = draft.reduce((sum, line) => sum + line.quantity, 0);
 
   const account = data.account;
-  const sentItems = account?.items ?? [];
-  const inKitchenItems = sentItems.filter((item) => item.status !== "delivered");
-  const deliveredItems = sentItems.filter((item) => item.status === "delivered");
+  const allItems = account?.items ?? [];
+  const sentItems = allItems.filter((item) => item.status !== "cancelled");
+  const cancelledItems = allItems.filter((item) => item.status === "cancelled");
 
   const accountTotalCents = account?.totalCents ?? 0;
   const displayTaxCents = accountTotalCents - Math.round(accountTotalCents / 1.16);
@@ -233,6 +249,8 @@ export function OrderPanel({
         })),
       });
       setDraft([]);
+      saveStoredDraft(storageId, []);
+      if (data.table?._id) saveStoredDraft(String(data.table._id), []);
       setConfirmSendOpen(false);
       showToast(`Orden enviada a ${res.stationNames.join(" y ")}`);
       router.push(returnHref);
@@ -243,12 +261,29 @@ export function OrderPanel({
     }
   }
 
-  async function handleMarkDelivered() {
+  async function handleDeliverItem(
+    orderItemId: Id<"orderItems">,
+    quantity: number,
+    dishName: string,
+  ) {
+    if (!account || actionPending) return;
+    setBusyItemId(orderItemId);
+    try {
+      await deliverOrderItem({ orderItemId, quantity });
+      showToast(`${quantity} × ${dishName} marcado como entregado`);
+    } catch (cause) {
+      showToast(errorMessage(cause, "No pudimos marcarlo como entregado."), "err");
+    } finally {
+      setBusyItemId(null);
+    }
+  }
+
+  async function handleDeliverAllReady() {
     if (!account || actionPending) return;
     setActionPending(true);
     try {
-      await markDelivered({ accountId: account._id });
-      showToast("Pedido marcado como entregado");
+      await deliverReady({ accountId: account._id });
+      showToast("Todo lo listo marcado como entregado");
     } catch (cause) {
       showToast(errorMessage(cause, "No pudimos marcarlo como entregado."), "err");
     } finally {
@@ -256,21 +291,67 @@ export function OrderPanel({
     }
   }
 
-  async function handleRequestBill() {
+  async function handleConfirmPayment() {
     if (!account || actionPending) return;
-    if (draft.length > 0) {
-      showToast("Tienes una orden sin confirmar. Tómala o quítala antes de pedir la cuenta.", "err");
-      return;
+    setActionPending(true);
+    try {
+      await confirmPayment({ accountId: account._id });
+      setPayConfirmOpen(false);
+      router.push(returnHref);
+    } catch (cause) {
+      showToast(errorMessage(cause, "No pudimos confirmar el pago."), "err");
+    } finally {
+      setActionPending(false);
     }
+  }
+
+  async function handleMarkDelivered() {
+    if (!account || actionPending) return;
+    setActionPending(true);
+    try {
+      await markDelivered({ accountId: account._id });
+      setMoreActionsOpen(false);
+      showToast("Pedido completo marcado como entregado");
+    } catch (cause) {
+      showToast(errorMessage(cause, "No pudimos marcarlo como entregado."), "err");
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function executeRequestBill() {
+    if (!account || actionPending) return;
     setActionPending(true);
     try {
       await requestBill({ accountId: account._id });
+      setBillWarningOpen(false);
       showToast(`${accountTitle} pasó a caja para pagar`);
     } catch (cause) {
       showToast(errorMessage(cause, "No pudimos pedir la cuenta."), "err");
     } finally {
       setActionPending(false);
     }
+  }
+
+  function handleRequestBillClick() {
+    if (!account || actionPending) return;
+    if (draft.length > 0) {
+      showToast("Tienes una orden sin confirmar. Tómala o quítala antes de pedir la cuenta.", "err");
+      return;
+    }
+    if (account.hasUndelivered) {
+      setBillWarningOpen(true);
+      return;
+    }
+    void executeRequestBill();
+  }
+
+  function handleBackClick() {
+    if (draft.length > 0) {
+      setLeaveDraftOpen(true);
+      return;
+    }
+    router.push(returnHref);
   }
 
   async function handleReopenOrdering() {
@@ -304,13 +385,14 @@ export function OrderPanel({
   return (
     <div className="az-page">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <Link
-          href={returnHref}
+        <button
+          type="button"
+          onClick={handleBackClick}
           className="inline-flex items-center gap-1.5 text-sm font-semibold hover:underline"
         >
           <ArrowLeft className="size-4" aria-hidden="true" />
           Volver
-        </Link>
+        </button>
         <span className="text-xs font-mono text-muted-foreground">
           {data.restaurantName} · {data.locationName}
         </span>
@@ -454,6 +536,13 @@ export function OrderPanel({
                     <Receipt aria-hidden="true" />
                     Quiere pagar
                   </span>
+                ) : account.tableStatus === "ready" ? (
+                  <span className="az-badge success">
+                    <Check aria-hidden="true" />
+                    Pedido listo
+                  </span>
+                ) : account.tableStatus === "partial" ? (
+                  <span className="az-badge partial">Entrega parcial</span>
                 ) : (
                   <span className="az-badge">Comiendo</span>
                 )
@@ -476,36 +565,39 @@ export function OrderPanel({
             )}
           </div>
 
-          {account && account.progressStep >= 0 && <OrderProgressBar step={account.progressStep} />}
+          {account && account.plates.length > 0 ? (
+            <PlatesProgressList
+              plates={account.plates}
+              deliveredUnits={account.deliveredUnits}
+              totalUnits={account.totalUnits}
+              canDeliver={data.canManageAccount}
+              busyItemId={busyItemId}
+              busyAll={actionPending}
+              onDeliverItem={(orderItemId, qty, dishName) =>
+                void handleDeliverItem(orderItemId, qty, dishName)
+              }
+              onDeliverAllReady={() => void handleDeliverAllReady()}
+            />
+          ) : (
+            account && account.progressStep >= 0 && <OrderProgressBar step={account.progressStep} />
+          )}
 
           {account?.state === "awaiting_payment" && data.canManageAccount && (
             <div className="az-notice warn">
               <Receipt className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
-              <span>
-                Ya pidieron la cuenta. Para agregar algo más, usa <strong>Volver a tomar orden</strong> en Más acciones.
-              </span>
-            </div>
-          )}
-
-          {account && account.hasUndelivered && data.canManageAccount && (
-            <div className={`az-notice ${account.hasReady ? "ok" : ""}`}>
-              <Check className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
               <div className="flex-1 grid gap-2">
                 <span>
-                  {account.hasReady
-                    ? "Hay productos listos para llevar a la mesa."
-                    : "Cuando entregues los productos en la mesa, márcalo aquí."}
+                  Ya pidieron la cuenta. Cuando recibas el pago, confírmalo para cerrar la cuenta y liberar la mesa.
                 </span>
                 <Button
                   type="button"
                   size="sm"
-                  className={account.hasReady ? "site-button az-coral-cta w-fit" : "w-fit"}
-                  variant={account.hasReady ? "default" : "outline"}
+                  className="site-button w-fit"
                   disabled={actionPending}
-                  onClick={() => void handleMarkDelivered()}
+                  onClick={() => setPayConfirmOpen(true)}
                 >
-                  <Check className="size-3.5" aria-hidden="true" />
-                  Marcar entregado
+                  <BadgeCheck className="size-4" aria-hidden="true" />
+                  Confirmar pago · {formatMoney(accountTotalCents, data.currencyCode)}
                 </Button>
               </div>
             </div>
@@ -607,12 +699,11 @@ export function OrderPanel({
             </div>
           )}
 
-          {inKitchenItems.length > 0 && (
+          {sentItems.length > 0 && (
             <div className="grid gap-1">
-              <div className="az-section-kicker">En preparación</div>
+              <div className="az-section-kicker">Detalle de la cuenta</div>
               <div className="az-lines">
-                {inKitchenItems.map((item) => {
-                  const stage = ITEM_STAGE_META[item.status];
+                {sentItems.map((item) => {
                   const canAdjust =
                     data.canManageAccount && account?.state === "open" && item.status === "ordered";
                   return (
@@ -630,23 +721,12 @@ export function OrderPanel({
                         {item.comments && (
                           <span className="text-xs text-muted-foreground">Comentario: {item.comments}</span>
                         )}
-                        <div className="az-cluster mt-1">
-                          <span className={`az-badge ${stage.cls}`}>
-                            <Clock aria-hidden="true" />
-                            {stage.label}
-                          </span>
-                          {item.preparations.map((prep, idx) => (
-                            <span key={`${prep.stationName}-${idx}`} className="az-badge">
-                              {prep.stationName}
-                            </span>
-                          ))}
-                        </div>
                       </div>
                       <div className="az-line-side">
                         <span className="az-money text-sm">
                           {formatMoney(item.lineTotalCents, data.currencyCode)}
                         </span>
-                        {canAdjust && (
+                        {canAdjust ? (
                           <span className="az-stepper">
                             <Button
                               type="button"
@@ -686,6 +766,22 @@ export function OrderPanel({
                               <Plus aria-hidden="true" />
                             </Button>
                           </span>
+                        ) : (
+                          data.canManageAccount &&
+                          account &&
+                          account.state !== "closed" &&
+                          account.state !== "voided" && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="xs"
+                              className="text-destructive hover:text-destructive"
+                              onClick={() => setCancellingItem(item)}
+                            >
+                              <Ban className="size-3" aria-hidden="true" />
+                              Cancelar
+                            </Button>
+                          )
                         )}
                       </div>
                     </div>
@@ -695,26 +791,35 @@ export function OrderPanel({
             </div>
           )}
 
-          {deliveredItems.length > 0 && (
+          {cancelledItems.length > 0 && (
             <div className="grid gap-1">
-              <div className="az-section-kicker">Entregado</div>
+              <div className="az-section-kicker">Cancelados</div>
               <div className="az-lines">
-                {deliveredItems.map((item) => (
-                  <div key={item._id} className="az-line">
+                {cancelledItems.map((item) => (
+                  <div key={item._id} className="az-line opacity-70">
                     <div className="az-line-text">
-                      <span className="text-sm font-medium">
+                      <span className="text-sm font-medium line-through">
                         {item.quantity} × {item.dishName}
                       </span>
-                      {item.modifiers.length > 0 && (
+                      {item.cancelReason && (
                         <span className="text-xs text-muted-foreground">
-                          {item.modifiers.map((m) => m.optionName).join(", ")}
+                          Motivo: {item.cancelReason}
                         </span>
                       )}
-                      {item.comments && (
-                        <span className="text-xs text-muted-foreground">Comentario: {item.comments}</span>
-                      )}
+                      <div className="az-cluster mt-1">
+                        <span className="az-badge danger">
+                          <Ban aria-hidden="true" />
+                          Cancelado
+                        </span>
+                        {item.cancelInventoryAction === "return" && (
+                          <span className="az-badge">Insumos devueltos</span>
+                        )}
+                        {item.cancelInventoryAction === "waste" && (
+                          <span className="az-badge warn">Registrado como pérdida</span>
+                        )}
+                      </div>
                     </div>
-                    <span className="az-money text-sm">
+                    <span className="az-money text-sm line-through text-muted-foreground">
                       {formatMoney(item.lineTotalCents, data.currencyCode)}
                     </span>
                   </div>
@@ -747,10 +852,21 @@ export function OrderPanel({
                   type="button"
                   variant="outline"
                   disabled={actionPending}
-                  onClick={() => void handleRequestBill()}
+                  onClick={handleRequestBillClick}
                 >
                   <Receipt className="size-4" aria-hidden="true" />
                   Pedir la cuenta
+                </Button>
+              )}
+              {account && account.state === "awaiting_payment" && data.canManageAccount && (
+                <Button
+                  type="button"
+                  className="site-button"
+                  disabled={actionPending}
+                  onClick={() => setPayConfirmOpen(true)}
+                >
+                  <BadgeCheck className="size-4" aria-hidden="true" />
+                  Confirmar pago
                 </Button>
               )}
               {account && data.canManageAccount && (
@@ -868,6 +984,33 @@ export function OrderPanel({
       {moreActionsOpen && account && (
         <AdminModal title="Más acciones" onClose={() => setMoreActionsOpen(false)}>
           <div className="grid gap-2">
+            {account.state === "open" && sentItems.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                className="justify-start"
+                disabled={actionPending}
+                onClick={() => {
+                  setMoreActionsOpen(false);
+                  setPayConfirmOpen(true);
+                }}
+              >
+                <BadgeCheck className="size-4" aria-hidden="true" />
+                Confirmar pago directo
+              </Button>
+            )}
+            {account.hasUndelivered && (
+              <Button
+                type="button"
+                variant="outline"
+                className="justify-start"
+                disabled={actionPending}
+                onClick={() => void handleMarkDelivered()}
+              >
+                <Check className="size-4" aria-hidden="true" />
+                Marcar todo como entregado
+              </Button>
+            )}
             {account.kind === "dine_in" && data.freeTables.length > 0 && (
               <Button
                 type="button"
@@ -880,6 +1023,20 @@ export function OrderPanel({
               >
                 <ArrowLeftRight className="size-4" aria-hidden="true" />
                 Mover a otra mesa
+              </Button>
+            )}
+            {data.activeWaiters.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                className="justify-start"
+                onClick={() => {
+                  setMoreActionsOpen(false);
+                  setReassignModalOpen(true);
+                }}
+              >
+                <UserCheck className="size-4" aria-hidden="true" />
+                Reasignar mesero
               </Button>
             )}
             {account.state === "awaiting_payment" && (
@@ -922,6 +1079,107 @@ export function OrderPanel({
             setMoveModalOpen(false);
             showToast("Cuenta movida de mesa");
           }}
+        />
+      )}
+
+      {cancellingItem && (
+        <CancelItemModal
+          item={cancellingItem}
+          onClose={() => setCancellingItem(null)}
+          onConfirm={async (reason, inventoryAction) => {
+            const res = await cancelOrderItem({
+              orderItemId: cancellingItem._id,
+              reason,
+              inventoryAction,
+            });
+            setCancellingItem(null);
+            showToast(
+              res.notifiedKitchen
+                ? `${cancellingItem.dishName} cancelado. Estación avisada para no prepararlo.`
+                : `${cancellingItem.dishName} cancelado.`,
+            );
+          }}
+        />
+      )}
+
+      {reassignModalOpen && account && (
+        <ReassignWaiterModal
+          currentWaiterId={account.assignedStaffId}
+          waiters={data.activeWaiters}
+          onClose={() => setReassignModalOpen(false)}
+          onReassign={async (targetStaffId) => {
+            const res = await reassignWaiter({ accountId: account._id, targetStaffId });
+            setReassignModalOpen(false);
+            showToast(`Ahora atiende ${res.assignedStaffName}`);
+          }}
+        />
+      )}
+
+      {billWarningOpen && account && (
+        <ConfirmModal
+          title="Hay platillos sin entregar"
+          message={`Todavía quedan ${Math.max(0, account.totalUnits - account.deliveredUnits)} de ${account.totalUnits} platillos sin entregar en ${accountTitle}. ¿Seguro que quieres pedir la cuenta ahora?`}
+          confirmLabel="Sí, pedir la cuenta"
+          pending={actionPending}
+          onConfirm={() => void executeRequestBill()}
+          onClose={() => setBillWarningOpen(false)}
+        />
+      )}
+
+      {leaveDraftOpen && (
+        <AdminModal
+          title="Tienes una orden sin confirmar"
+          onClose={() => setLeaveDraftOpen(false)}
+          footer={
+            <>
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => {
+                  setDraft([]);
+                  saveStoredDraft(storageId, []);
+                  setLeaveDraftOpen(false);
+                  router.push(returnHref);
+                }}
+              >
+                Descartar y salir
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  saveStoredDraft(storageId, draft);
+                  setLeaveDraftOpen(false);
+                  router.push(returnHref);
+                }}
+              >
+                Guardar borrador y salir
+              </Button>
+              <Button
+                type="button"
+                className="site-button"
+                onClick={() => setLeaveDraftOpen(false)}
+              >
+                Seguir editando
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-muted-foreground">
+            Agregaste <strong>{draftCount}</strong> {draftCount === 1 ? "producto" : "productos"} que todavía no se
+            envían a preparación. Puedes guardar el borrador para retomarlo después desde Mis mesas, o descartarlo.
+          </p>
+        </AdminModal>
+      )}
+
+      {payConfirmOpen && account && (
+        <ConfirmModal
+          title={`Confirmar pago de ${accountTitle}`}
+          message={`Folio A-${String(account.folio).padStart(4, "0")} por ${formatMoney(accountTotalCents, data.currencyCode)}. Al confirmar, la cuenta se cerrará${data.table ? " y la mesa volverá a estar libre" : ""}.`}
+          confirmLabel="Sí, confirmar pago"
+          pending={actionPending}
+          onConfirm={() => void handleConfirmPayment()}
+          onClose={() => setPayConfirmOpen(false)}
         />
       )}
 
@@ -1246,6 +1504,171 @@ function MoveTableModal({
         </div>
         <p className="text-xs text-muted-foreground">
           La mesa de origen quedará libre y la cuenta conservará todos sus productos.
+        </p>
+        {error && <p className="floor-error" role="alert">{error}</p>}
+      </form>
+    </AdminModal>
+  );
+}
+
+function CancelItemModal({
+  item,
+  onClose,
+  onConfirm,
+}: {
+  item: AccountItem;
+  onClose: () => void;
+  onConfirm: (reason: string, inventoryAction: "none" | "return" | "waste") => Promise<void>;
+}) {
+  const consumed = item.inventoryConsumedQuantity > 0;
+  const [reason, setReason] = useState("");
+  const [inventoryAction, setInventoryAction] = useState<"none" | "return" | "waste">(
+    consumed ? "return" : "none",
+  );
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!reason.trim()) {
+      setError("Escribe el motivo de la cancelación.");
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      await onConfirm(reason.trim(), consumed ? inventoryAction : "none");
+    } catch (cause) {
+      setError(errorMessage(cause, "No pudimos cancelar el platillo."));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <AdminModal
+      title={`Cancelar ${item.quantity} × ${item.dishName}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button type="button" variant="outline" disabled={pending} onClick={onClose}>
+            Conservar platillo
+          </Button>
+          <Button type="submit" form="cancel-item-form" variant="destructive" disabled={pending}>
+            {pending ? "Cancelando…" : "Cancelar platillo"}
+          </Button>
+        </>
+      }
+    >
+      <form id="cancel-item-form" className="grid gap-4" onSubmit={submit}>
+        <p className="text-sm text-muted-foreground">
+          {consumed
+            ? "La estación ya empezó a prepararlo. Aparecerá tachado como NO PREPARAR en su pantalla para que lo detengan."
+            : "Todavía no se empieza a preparar, así que no afectará el inventario."}
+        </p>
+        <div className="az-field">
+          <label htmlFor="cancel-reason">Motivo (obligatorio)</label>
+          <input
+            id="cancel-reason"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            maxLength={160}
+            placeholder="Por ejemplo, el comensal cambió de opinión"
+            autoFocus
+            required
+          />
+        </div>
+        {consumed && (
+          <fieldset className="grid gap-2">
+            <legend className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+              ¿Qué pasa con los insumos ya descontados?
+            </legend>
+            <label className={`az-opt${inventoryAction === "return" ? " on" : ""}`}>
+              <input
+                type="radio"
+                name="cancel-inv"
+                checked={inventoryAction === "return"}
+                onChange={() => setInventoryAction("return")}
+              />
+              <span className="text-sm">No se usaron · los insumos regresan al inventario</span>
+            </label>
+            <label className={`az-opt${inventoryAction === "waste" ? " on" : ""}`}>
+              <input
+                type="radio"
+                name="cancel-inv"
+                checked={inventoryAction === "waste"}
+                onChange={() => setInventoryAction("waste")}
+              />
+              <span className="text-sm">Se registra como pérdida por lo ya preparado</span>
+            </label>
+          </fieldset>
+        )}
+        {error && <p className="floor-error" role="alert">{error}</p>}
+      </form>
+    </AdminModal>
+  );
+}
+
+function ReassignWaiterModal({
+  currentWaiterId,
+  waiters,
+  onClose,
+  onReassign,
+}: {
+  currentWaiterId: Id<"staff"> | null;
+  waiters: Array<{ _id: Id<"staff">; displayName: string }>;
+  onClose: () => void;
+  onReassign: (targetStaffId: Id<"staff">) => Promise<void>;
+}) {
+  const [targetId, setTargetId] = useState<string>(
+    waiters.find((w) => w._id !== currentWaiterId)?._id ?? waiters[0]?._id ?? "",
+  );
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!targetId) return;
+    setPending(true);
+    setError(null);
+    try {
+      await onReassign(targetId as Id<"staff">);
+    } catch (cause) {
+      setError(errorMessage(cause, "No pudimos reasignar el mesero."));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <AdminModal
+      title="Reasignar mesero"
+      onClose={onClose}
+      footer={
+        <>
+          <Button type="button" variant="outline" disabled={pending} onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" form="reassign-waiter-form" className="site-button" disabled={pending || !targetId}>
+            {pending ? "Reasignando…" : "Reasignar"}
+          </Button>
+        </>
+      }
+    >
+      <form id="reassign-waiter-form" className="grid gap-3" onSubmit={submit}>
+        <div className="az-field">
+          <label htmlFor="reassign-target">Mesero a cargo</label>
+          <select id="reassign-target" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+            {waiters.map((w) => (
+              <option key={w._id} value={w._id}>
+                {w.displayName}
+                {w._id === currentWaiterId ? " (actual)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          La cuenta y los avisos de esta mesa pasarán al mesero seleccionado.
         </p>
         {error && <p className="floor-error" role="alert">{error}</p>}
       </form>

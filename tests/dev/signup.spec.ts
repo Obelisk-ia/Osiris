@@ -46,9 +46,9 @@ test("owner and employee sign up directly into the dashboard and resume invalid-
     await staff.getByLabel("Tu nombre", { exact: true }).fill("Test employee");
     await staff.getByLabel("Código del restaurante", { exact: true }).fill("OSR-AAAA-BBBB-CCCC");
     await staff.getByRole("checkbox", { name: /Mesero/ }).check();
-    await staff.getByRole("checkbox", { name: /Cocina y barra/ }).check();
+    await staff.getByRole("checkbox", { name: /Chef \(Cocina\)/ }).check();
     await staff.getByRole("checkbox", { name: /Caja/ }).check();
-    await expect(staff.getByRole("checkbox")).toHaveCount(3);
+    await expect(staff.getByRole("checkbox")).toHaveCount(6);
     await staff.getByLabel("Correo", { exact: true }).fill(`signup-staff-${id}@example.invalid`);
     await staff.getByLabel("Contraseña", { exact: true }).fill(password);
     await staff.getByRole("button", { name: "Crear cuenta", exact: true }).click();
@@ -56,7 +56,7 @@ test("owner and employee sign up directly into the dashboard and resume invalid-
     await expect(staff).toHaveURL(/\/crear-cuenta$/);
     await expect(staff.getByLabel("Tu nombre", { exact: true })).toHaveValue("Test employee");
     await expect(staff.getByRole("checkbox", { name: /Mesero/ })).toBeChecked();
-    await expect(staff.getByRole("checkbox", { name: /Cocina y barra/ })).toBeChecked();
+    await expect(staff.getByRole("checkbox", { name: /Chef \(Cocina\)/ })).toBeChecked();
     await expect(staff.getByRole("checkbox", { name: /Caja/ })).toBeChecked();
     await expect(staff.getByLabel("Contraseña", { exact: true })).toHaveCount(0);
     // Reloading an interrupted registration resumes on signup, never on a
@@ -68,24 +68,14 @@ test("owner and employee sign up directly into the dashboard and resume invalid-
     await staff.getByLabel("Tu nombre", { exact: true }).fill("Test employee");
     await staff.getByLabel("Código del restaurante", { exact: true }).fill(code);
     await staff.getByRole("checkbox", { name: /Mesero/ }).check();
-    await staff.getByRole("checkbox", { name: /Cocina y barra/ }).check();
+    await staff.getByRole("checkbox", { name: /Chef \(Cocina\)/ }).check();
     await staff.getByRole("checkbox", { name: /Caja/ }).check();
     await staff.getByRole("button", { name: "Guardar y entrar al panel", exact: true }).click();
-    await expect(staff).toHaveURL(/\/cuenta$/);
-    await expect(staff.getByRole("heading", { name: restaurant, exact: true })).toBeVisible();
-    await expect(staff.getByLabel("Tus roles", { exact: true })).toContainText("Mesero");
-    await expect(staff.getByLabel("Tus roles", { exact: true })).toContainText("Cocina y barra");
-    await expect(staff.getByLabel("Tus roles", { exact: true })).toContainText("Caja");
-    await expect(staff.getByLabel("Tus roles", { exact: true }).getByText("Chef", { exact: true })).toHaveCount(0);
-    await expect(staff.getByLabel("Tus roles", { exact: true }).getByText("Bartender", { exact: true })).toHaveCount(0);
-    await expect(staff.getByLabel("Tus roles", { exact: true }).getByText("Barista", { exact: true })).toHaveCount(0);
-    // Cocina y barra grants all three underlying station roles, so the
-    // employee also sees the kitchen workspace.
-    await expect(staff.getByRole("navigation", { name: "Tus áreas de trabajo" }).getByRole("link")).toHaveCount(4);
-    await expect(staff.getByRole("navigation", { name: "Tus áreas de trabajo" }).getByRole("link", { name: /Cocina y barra/ })).toBeVisible();
-    await expect(staff.getByRole("heading", { name: "Código de tu restaurante", exact: true })).toHaveCount(0);
+    await expect(staff).toHaveURL(/\/cuenta\/mesas$/);
+    await expect(staff.getByText(restaurant)).toBeVisible();
     await staff.reload();
-    await expect(staff.getByRole("heading", { name: restaurant, exact: true })).toBeVisible();
+    await expect(staff.getByText(restaurant)).toBeVisible();
+    await staff.getByRole("button", { name: /Test employee/ }).click();
     await staff.getByRole("button", { name: "Cerrar sesión", exact: true }).click();
     await expect(staff).toHaveURL(/\/acceso$/);
   } finally {

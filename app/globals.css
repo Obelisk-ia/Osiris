@@ -284,11 +284,13 @@
 .floor-table-name { font-family: var(--font-inter-tight), sans-serif; font-size: 12px; font-weight: 700; line-height: 1.1; white-space: nowrap; }
 .floor-table-sub { font-size: 10px; color: var(--muted-foreground); }
 .floor-table.occupied .floor-surface { fill: #e9a68f; stroke: #b3543f; }
+.floor-table.partial .floor-surface { fill: #9cb6b8; stroke: #46686b; }
 .floor-table.attended .floor-surface { fill: #7f9d6b; stroke: #46613a; }
 .floor-table.payment .floor-surface { fill: #e2bb5f; stroke: #9a7422; }
 .floor-table.attended .floor-table-name, .floor-table.attended .floor-table-sub { color: #f7f1de; }
 .floor-badge { margin-top: 2px; padding: 2px 6px; border-radius: 999px; background: #e5dcc6; color: #4b4539; font-size: 9px; font-weight: 600; white-space: nowrap; }
 .floor-badge.occupied { background: #f3d4c8; color: #8a3f2c; }
+.floor-badge.partial { background: #d5e4e5; color: #2c4b4e; }
 .floor-badge.attended { background: #cfe0c2; color: #35502b; }
 .floor-badge.payment { background: #f0dfad; color: #705314; }
 .floor-table.dim { opacity: 0.25; }
@@ -299,6 +301,7 @@
 .floor-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .floor-legend i { width: 13px; height: 13px; border: 1px solid #8d7f5e; border-radius: 4px; background: #d9c9a3; }
 .floor-legend i.occupied { background: #e9a68f; border-color: #b3543f; }
+.floor-legend i.partial { background: #9cb6b8; border-color: #46686b; }
 .floor-legend i.attended { background: #7f9d6b; border-color: #46613a; }
 .floor-legend i.payment { background: #e2bb5f; border-color: #9a7422; }
 
@@ -1293,4 +1296,185 @@
   font-size: 15px;
   font-weight: 800;
   background: var(--az-veil);
+}
+
+/* Kitchen / Station 3-column Kanban */
+.az-kitchen-board {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 1024px) {
+  .az-kitchen-board {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+.az-ticket {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--az-border-soft);
+  border-radius: 16px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+}
+.az-ticket.ready {
+  border-color: var(--az-success);
+  background: color-mix(in oklab, var(--az-success), #efe7d2 86%);
+}
+.az-ticket.late {
+  border-color: var(--az-warn);
+  background: color-mix(in oklab, var(--az-warn), #efe7d2 74%);
+}
+.az-ticket-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.az-ticket-title {
+  font-family: var(--font-inter-tight), sans-serif;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.az-ticket-items {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--az-border-soft);
+  padding-top: 10px;
+}
+.az-ticket-item {
+  display: grid;
+  gap: 3px;
+}
+.az-ticket-item + .az-ticket-item {
+  border-top: 1px dashed var(--az-border-soft);
+  padding-top: 8px;
+}
+
+/* Partial delivery badge & per-station waiter cards */
+.az-badge.partial {
+  background: #d5e4e5;
+  color: #2c4b4e;
+}
+.az-waiter-row.partial {
+  border-color: #6b8e91;
+  background: color-mix(in oklab, #9cb6b8, #efe7d2 84%);
+}
+.az-station-list {
+  display: grid;
+  gap: 10px;
+}
+.az-station-box {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--az-border-soft);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--card) 82%, transparent);
+}
+.az-station-box.ready {
+  border-color: var(--az-success);
+  background: color-mix(in oklab, var(--az-success), #efe7d2 86%);
+}
+.az-station-box.delivered {
+  opacity: 0.82;
+  background: color-mix(in oklab, var(--background) 70%, transparent);
+}
+.az-progress.compact .az-progress-bar {
+  height: 4px;
+}
+.az-progress.compact .az-progress-label {
+  font-size: 10px;
+}
+
+/* Plate-first waiter checklist */
+.az-plate-wrap {
+  display: grid;
+  gap: 10px;
+}
+.az-plate-summary {
+  display: grid;
+  gap: 6px;
+}
+.az-plate-summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2a2620;
+}
+.az-plate-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--az-border-soft);
+  overflow: hidden;
+}
+.az-plate-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--foreground);
+  transition: width 220ms ease;
+}
+.az-plate-fill.done {
+  background: var(--az-success);
+}
+.az-plate-list {
+  display: grid;
+  gap: 6px;
+}
+.az-plate-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--az-border-soft);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--card) 86%, transparent);
+  text-align: left;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+.az-plate-item.ready {
+  border-color: var(--az-success);
+  background: color-mix(in oklab, var(--az-success), #efe7d2 84%);
+  cursor: pointer;
+}
+.az-plate-item.ready:hover:not(:disabled) {
+  border-color: var(--foreground);
+  background: color-mix(in oklab, var(--az-success), #efe7d2 76%);
+}
+.az-plate-item.delivered {
+  opacity: 0.72;
+  background: color-mix(in oklab, var(--background) 65%, transparent);
+}
+.az-plate-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 6px;
+  border: 1.5px solid var(--border);
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+.az-plate-item.ready .az-plate-check {
+  border-color: var(--az-success-ink);
+  background: #ffffffaa;
+  color: var(--az-success-ink);
+}
+.az-plate-item.delivered .az-plate-check {
+  border-color: var(--az-success);
+  background: var(--az-success);
+  color: var(--card);
+}
+.az-plate-check svg {
+  width: 14px;
+  height: 14px;
 }
