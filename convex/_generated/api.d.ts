@@ -9,6 +9,11 @@
  */
 
 import type * as admin from "../admin.js";
+import type * as assistant from "../assistant.js";
+import type * as assistantAgent from "../assistantAgent.js";
+import type * as assistantData from "../assistantData.js";
+import type * as assistantDocs from "../assistantDocs.js";
+import type * as assistantExcel from "../assistantExcel.js";
 import type * as auth from "../auth.js";
 import type * as buffet from "../buffet.js";
 import type * as cashier from "../cashier.js";
@@ -39,6 +44,11 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   admin: typeof admin;
+  assistant: typeof assistant;
+  assistantAgent: typeof assistantAgent;
+  assistantData: typeof assistantData;
+  assistantDocs: typeof assistantDocs;
+  assistantExcel: typeof assistantExcel;
   auth: typeof auth;
   buffet: typeof buffet;
   cashier: typeof cashier;
@@ -93,4 +103,5 @@ export declare const components: {
   authUsername: import("@convex-dev/auth/components/username/_generated/component.js").ComponentApi<"authUsername">;
   authPassword: import("@convex-dev/auth/components/password/_generated/component.js").ComponentApi<"authPassword">;
   rateLimiter: import("@convex-dev/rate-limiter/_generated/component.js").ComponentApi<"rateLimiter">;
+  agent: import("@convex-dev/agent/_generated/component.js").ComponentApi<"agent">;
 };

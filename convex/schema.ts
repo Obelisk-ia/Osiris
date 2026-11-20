@@ -328,4 +328,40 @@ export default defineSchema({
   }).index("by_accountId", ["accountId"])
     .index("by_shiftId", ["shiftId"])
     .index("by_locationId_and_createdAt", ["locationId", "createdAt"]),
+
+  assistantThreads: defineTable({
+    ...scope,
+    staffId: v.id("staff"),
+    threadId: v.string(),
+    title: v.string(),
+    contextPage: v.optional(v.string()),
+    updatedAt: v.number(),
+  }).index("by_staffId_and_updatedAt", ["staffId", "updatedAt"])
+    .index("by_threadId", ["threadId"]),
+
+  assistantProposals: defineTable({
+    ...scope,
+    threadId: v.string(),
+    createdByStaffId: v.id("staff"),
+    status: v.union(v.literal("pending"), v.literal("approved"), v.literal("rejected")),
+    kind: v.union(
+      v.literal("menu_batch"),
+      v.literal("menu_edits"),
+      v.literal("inventory_batch"),
+      v.literal("inventory_edits"),
+      v.literal("inventory_receipt"),
+      v.literal("buffet_batch"),
+      v.literal("floor_batch"),
+      v.literal("floor_layout_changes"),
+      v.literal("section_assignments"),
+      v.literal("recipe_batch"),
+    ),
+    title: v.string(),
+    summary: v.string(),
+    payload: v.string(),
+    resultSummary: v.optional(v.string()),
+    decidedByStaffId: v.optional(v.id("staff")),
+    decidedAt: v.optional(v.number()),
+  }).index("by_threadId", ["threadId"])
+    .index("by_locationId_and_status", ["locationId", "status"]),
 });

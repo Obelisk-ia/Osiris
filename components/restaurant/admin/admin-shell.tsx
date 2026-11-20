@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { formatRoles, type ServiceMode, type StaffRole } from "@/lib/restaurant-roles";
 import { errorMessage, formatShortDate, initials, toRoman } from "@/lib/format";
 import { NotificationsBell } from "@/components/restaurant/notifications-bell";
+import { AssistantDrawer } from "@/components/restaurant/assistant/assistant-drawer";
 import { AdminModal, ConfirmModal } from "./admin-ui";
 
 export type AdminNavItem = {
@@ -488,6 +489,8 @@ export function AdminShell({
           onClose={() => setConfirmRotate(false)}
         />
       )}
+
+      {canQuery && <AssistantDrawer />}
     </div>
   );
 }
