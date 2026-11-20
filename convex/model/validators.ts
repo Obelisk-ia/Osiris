@@ -8,6 +8,10 @@ export const stationRole = v.union(
   v.literal("chef"), v.literal("bar"), v.literal("bartender"), v.literal("barista"),
 );
 export const staffRole = v.union(v.literal("owner"), v.literal("manager"), operationalRole);
+export const managerPermission = v.union(
+  v.literal("edit_menu"),
+  v.literal("transfer_staff"),
+);
 export const orderStatus = v.union(
   v.literal("ordered"), v.literal("preparing"), v.literal("ready"), v.literal("delivered"), v.literal("cancelled"),
 );

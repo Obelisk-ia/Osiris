@@ -19,6 +19,7 @@ import type * as kitchen from "../kitchen.js";
 import type * as menu from "../menu.js";
 import type * as model_access from "../model/access.js";
 import type * as model_billing from "../model/billing.js";
+import type * as model_dishes from "../model/dishes.js";
 import type * as model_inventory from "../model/inventory.js";
 import type * as model_notifications from "../model/notifications.js";
 import type * as model_orders from "../model/orders.js";
@@ -48,6 +49,7 @@ declare const fullApi: ApiFromModules<{
   menu: typeof menu;
   "model/access": typeof model_access;
   "model/billing": typeof model_billing;
+  "model/dishes": typeof model_dishes;
   "model/inventory": typeof model_inventory;
   "model/notifications": typeof model_notifications;
   "model/orders": typeof model_orders;

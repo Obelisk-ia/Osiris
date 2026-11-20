@@ -1,8 +1,10 @@
 import { ConvexError, v } from "convex/values";
 import schema from "./schema";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
-import { buffetPrices, serviceMode, staffRole } from "./model/validators";
+import { buffetPrices, managerPermission, serviceMode, staffRole } from "./model/validators";
+import { canTransferStaff } from "../lib/restaurant-roles";
 
 const EDITORS = ["owner", "manager"] as const;
 
@@ -129,20 +131,58 @@ export const updateFeatures = mutation({
   },
 });
 
-/* ───────── Miembros del equipo (solo dueño gestiona) ───────── */
+/* ───────── Miembros del equipo (dueño gestiona; gerentes autorizados pueden transferir) ───────── */
+
+async function clearStaffFloorAssignments(
+  ctx: MutationCtx,
+  staffId: Id<"staff">,
+  locationId: Id<"locations">,
+) {
+  const [sections, tables] = await Promise.all([
+    ctx.db
+      .query("sections")
+      .withIndex("by_locationId_and_sortOrder", (q) => q.eq("locationId", locationId))
+      .take(50),
+    ctx.db
+      .query("diningTables")
+      .withIndex("by_locationId_and_assignedStaffId", (q) =>
+        q.eq("locationId", locationId).eq("assignedStaffId", staffId),
+      )
+      .take(200),
+  ]);
+  const now = Date.now();
+  for (const section of sections) {
+    const latest = await ctx.db
+      .query("sectionAssignments")
+      .withIndex("by_sectionId_and_startsAt", (q) => q.eq("sectionId", section._id))
+      .order("desc")
+      .take(1);
+    if (latest[0] && latest[0].assignedStaffId === staffId && latest[0].endsAt === undefined) {
+      await ctx.db.patch("sectionAssignments", latest[0]._id, { endsAt: now });
+    }
+  }
+  for (const table of tables) {
+    await ctx.db.patch("diningTables", table._id, { assignedStaffId: undefined });
+  }
+}
 
 export const membersSnapshot = query({
   args: {},
   returns: v.object({
     restaurantName: v.string(),
     locationName: v.string(),
+    currentLocationId: v.id("locations"),
     currentStaffId: v.id("staff"),
     isOwner: v.boolean(),
+    canTransferStaff: v.boolean(),
+    branches: v.array(v.object({ _id: v.id("locations"), name: v.string() })),
     members: v.array(schema.doc("staff")),
   }),
   handler: async (ctx) => {
     const staff = await editor(ctx);
-    const [restaurant, location, active, inactive] = await Promise.all([
+    const isOwner = staff.roles.includes("owner");
+    const allowTransfer = canTransferStaff(staff);
+    const [restaurant, location, active, inactive, orgBranches] = await Promise.all([
       ctx.db.get("organizations", staff.organizationId),
       ctx.db.get("locations", staff.locationId),
       ctx.db
@@ -157,12 +197,21 @@ export const membersSnapshot = query({
           q.eq("locationId", staff.locationId).eq("isActive", false),
         )
         .take(100),
+      allowTransfer
+        ? ctx.db
+            .query("locations")
+            .withIndex("by_organizationId", (q) => q.eq("organizationId", staff.organizationId))
+            .take(50)
+        : Promise.resolve([]),
     ]);
     return {
       restaurantName: restaurant?.name ?? "Tu restaurante",
       locationName: location?.name ?? "Sucursal principal",
+      currentLocationId: staff.locationId,
       currentStaffId: staff._id,
-      isOwner: staff.roles.includes("owner"),
+      isOwner,
+      canTransferStaff: allowTransfer,
+      branches: orgBranches.map((branch) => ({ _id: branch._id, name: branch.name })),
       members: [...active, ...inactive],
     };
   },
@@ -172,6 +221,7 @@ export const updateMemberRoles = mutation({
   args: {
     memberId: v.id("staff"),
     roles: v.array(staffRole),
+    managerPermissions: v.optional(v.array(managerPermission)),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -190,7 +240,55 @@ export const updateMemberRoles = mutation({
     if (member._id !== owner._id && nextRoles.includes("owner")) {
       throw new ConvexError("Solo el titular puede tener el rol de dueño.");
     }
-    await ctx.db.patch("staff", member._id, { roles: nextRoles });
+    const nextPermissions = nextRoles.includes("manager")
+      ? [...new Set(args.managerPermissions ?? [])].sort()
+      : [];
+    await ctx.db.patch("staff", member._id, {
+      roles: nextRoles,
+      managerPermissions: nextPermissions.length > 0 ? nextPermissions : undefined,
+    });
+    return null;
+  },
+});
+
+export const transferMemberBranch = mutation({
+  args: {
+    memberId: v.id("staff"),
+    targetLocationId: v.id("locations"),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const actor = await editor(ctx);
+    const isOwner = actor.roles.includes("owner");
+    if (!canTransferStaff(actor)) {
+      throw new ConvexError("No tienes permiso para cambiar personal de sucursal.");
+    }
+    const [member, targetBranch] = await Promise.all([
+      ctx.db.get("staff", args.memberId),
+      ctx.db.get("locations", args.targetLocationId),
+    ]);
+    if (!member || member.organizationId !== actor.organizationId) {
+      throw new ConvexError("No encontramos a esa persona en tu equipo.");
+    }
+    if (!targetBranch || targetBranch.organizationId !== actor.organizationId) {
+      throw new ConvexError("No encontramos la sucursal de destino.");
+    }
+    if (member.roles.includes("owner")) {
+      throw new ConvexError("El dueño puede cambiar de sucursal directamente desde el selector.");
+    }
+    if (!isOwner) {
+      if (member._id === actor._id) {
+        throw new ConvexError("No puedes cambiarte de sucursal a ti mismo. Pídeselo al dueño.");
+      }
+      if (member.locationId !== actor.locationId) {
+        throw new ConvexError("Solo puedes transferir personal de tu propia sucursal.");
+      }
+    }
+    if (member.locationId === targetBranch._id) {
+      throw new ConvexError("Esta persona ya pertenece a esa sucursal.");
+    }
+    await clearStaffFloorAssignments(ctx, member._id, member.locationId);
+    await ctx.db.patch("staff", member._id, { locationId: targetBranch._id });
     return null;
   },
 });
@@ -210,27 +308,13 @@ export const toggleMemberActive = mutation({
     const nextActive = !member.isActive;
     await ctx.db.patch("staff", member._id, { isActive: nextActive });
     if (!nextActive) {
-      // Clear any active section assignments for this waiter.
-      const sections = await ctx.db
-        .query("sections")
-        .withIndex("by_locationId_and_sortOrder", (q) => q.eq("locationId", member.locationId))
-        .take(50);
-      for (const section of sections) {
-        const latest = await ctx.db
-          .query("sectionAssignments")
-          .withIndex("by_sectionId_and_startsAt", (q) => q.eq("sectionId", section._id))
-          .order("desc")
-          .take(1);
-        if (latest[0] && latest[0].assignedStaffId === member._id && latest[0].endsAt === undefined) {
-          await ctx.db.patch("sectionAssignments", latest[0]._id, { endsAt: Date.now() });
-        }
-      }
+      await clearStaffFloorAssignments(ctx, member._id, member.locationId);
     }
     return null;
   },
 });
 
-/* ───────── Sucursales ───────── */
+/* ───────── Sucursales (solo dueño) ───────── */
 
 const ALLOWED_TIMEZONES = new Set([
   "America/Mexico_City",
@@ -242,6 +326,18 @@ const ALLOWED_TIMEZONES = new Set([
   "America/Chihuahua",
 ]);
 
+const branchStatusView = v.object({
+  locationId: v.id("locations"),
+  activeStaffCount: v.number(),
+  totalTables: v.number(),
+  occupiedTables: v.number(),
+  openAccounts: v.number(),
+  awaitingPayment: v.number(),
+  pendingTickets: v.number(),
+  hasOpenShift: v.boolean(),
+  lowStockCount: v.number(),
+});
+
 export const branchesSnapshot = query({
   args: {},
   returns: v.object({
@@ -251,24 +347,118 @@ export const branchesSnapshot = query({
     currentLocationId: v.id("locations"),
     isOwner: v.boolean(),
     branches: v.array(schema.doc("locations")),
+    branchStatuses: v.array(branchStatusView),
   }),
   handler: async (ctx) => {
-    const staff = await editor(ctx);
-    const [restaurant, branches] = await Promise.all([
+    const staff = await ownerOnly(ctx);
+    const [restaurant, branches, inventoryItems] = await Promise.all([
       ctx.db.get("organizations", staff.organizationId),
       ctx.db
         .query("locations")
         .withIndex("by_organizationId", (q) => q.eq("organizationId", staff.organizationId))
         .take(50),
+      ctx.db
+        .query("inventoryItems")
+        .withIndex("by_organizationId_and_name", (q) => q.eq("organizationId", staff.organizationId))
+        .take(250),
     ]);
     if (!restaurant) throw new ConvexError("No encontramos tu restaurante.");
+    const trackedItems = inventoryItems.filter(
+      (item) => item.isActive && (item.minMicros ?? 0) > 0,
+    );
+
+    const branchStatuses = await Promise.all(
+      branches.map(async (branch) => {
+        const [
+          activeStaff,
+          tables,
+          openAccs,
+          awaitingAccs,
+          orderedPreps,
+          preparingPreps,
+          latestShift,
+          balances,
+        ] = await Promise.all([
+          ctx.db
+            .query("staff")
+            .withIndex("by_locationId_and_isActive", (q) =>
+              q.eq("locationId", branch._id).eq("isActive", true),
+            )
+            .take(100),
+          ctx.db
+            .query("diningTables")
+            .withIndex("by_locationId_and_isActive", (q) =>
+              q.eq("locationId", branch._id).eq("isActive", true),
+            )
+            .take(200),
+          ctx.db
+            .query("accounts")
+            .withIndex("by_locationId_and_state", (q) =>
+              q.eq("locationId", branch._id).eq("state", "open"),
+            )
+            .take(100),
+          ctx.db
+            .query("accounts")
+            .withIndex("by_locationId_and_state", (q) =>
+              q.eq("locationId", branch._id).eq("state", "awaiting_payment"),
+            )
+            .take(100),
+          ctx.db
+            .query("orderItemPreparations")
+            .withIndex("by_locationId_and_status", (q) =>
+              q.eq("locationId", branch._id).eq("status", "ordered"),
+            )
+            .take(100),
+          ctx.db
+            .query("orderItemPreparations")
+            .withIndex("by_locationId_and_status", (q) =>
+              q.eq("locationId", branch._id).eq("status", "preparing"),
+            )
+            .take(100),
+          ctx.db
+            .query("cashShifts")
+            .withIndex("by_locationId_and_openedAt", (q) => q.eq("locationId", branch._id))
+            .order("desc")
+            .take(1),
+          trackedItems.length > 0
+            ? ctx.db
+                .query("inventoryBalances")
+                .withIndex("by_locationId_and_inventoryItemId", (q) =>
+                  q.eq("locationId", branch._id),
+                )
+                .take(300)
+            : Promise.resolve([]),
+        ]);
+
+        const balanceMap = new Map(balances.map((b) => [b.inventoryItemId, b.quantityMicros]));
+        let lowStockCount = 0;
+        for (const item of trackedItems) {
+          const qty = balanceMap.get(item._id) ?? 0;
+          if (qty <= (item.minMicros ?? 0)) lowStockCount++;
+        }
+
+        return {
+          locationId: branch._id,
+          activeStaffCount: activeStaff.filter((member) => !member.roles.includes("owner")).length,
+          totalTables: tables.length,
+          occupiedTables: tables.filter((t) => t.status !== "empty").length,
+          openAccounts: openAccs.length,
+          awaitingPayment: awaitingAccs.length,
+          pendingTickets: orderedPreps.length + preparingPreps.length,
+          hasOpenShift: Boolean(latestShift[0] && latestShift[0].closedAt === undefined),
+          lowStockCount,
+        };
+      }),
+    );
+
     return {
       restaurantId: restaurant._id,
       restaurantName: restaurant.name,
       currencyCode: restaurant.currencyCode,
       currentLocationId: staff.locationId,
-      isOwner: staff.roles.includes("owner"),
+      isOwner: true,
       branches,
+      branchStatuses,
     };
   },
 });
@@ -281,7 +471,7 @@ export const createBranch = mutation({
   },
   returns: v.id("locations"),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await ownerOnly(ctx);
     const name = requiredText(args.name, "Nombre de la sucursal", 100);
     const timeZone = ALLOWED_TIMEZONES.has(args.timeZone) ? args.timeZone : "America/Mexico_City";
     const existing = await ctx.db
@@ -328,7 +518,7 @@ export const updateBranch = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await ownerOnly(ctx);
     const branch = await ctx.db.get("locations", args.locationId);
     if (!branch || branch.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos esa sucursal.");
@@ -352,7 +542,7 @@ export const switchBranch = mutation({
   args: { locationId: v.id("locations") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await ownerOnly(ctx);
     const branch = await ctx.db.get("locations", args.locationId);
     if (!branch || branch.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos esa sucursal.");
@@ -366,7 +556,7 @@ export const removeBranch = mutation({
   args: { locationId: v.id("locations") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await ownerOnly(ctx);
     if (args.locationId === staff.locationId) {
       throw new ConvexError("No puedes quitar la sucursal en uso. Cambia primero a otra.");
     }
@@ -374,7 +564,7 @@ export const removeBranch = mutation({
     if (!branch || branch.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos esa sucursal.");
     }
-    const [activeStaff, openAccounts] = await Promise.all([
+    const [activeStaff, openAccounts, orgCode, availabilityOverrides] = await Promise.all([
       ctx.db
         .query("staff")
         .withIndex("by_locationId_and_isActive", (q) =>
@@ -387,12 +577,26 @@ export const removeBranch = mutation({
           q.eq("locationId", branch._id).eq("state", "open"),
         )
         .take(1),
+      ctx.db
+        .query("organizationCodes")
+        .withIndex("by_organizationId", (q) => q.eq("organizationId", staff.organizationId))
+        .unique(),
+      ctx.db
+        .query("locationDishAvailability")
+        .withIndex("by_locationId", (q) => q.eq("locationId", branch._id))
+        .take(500),
     ]);
     if (activeStaff.length > 0) {
       throw new ConvexError("Esta sucursal tiene personal activo asignado.");
     }
     if (openAccounts.length > 0) {
       throw new ConvexError("Esta sucursal tiene cuentas abiertas.");
+    }
+    if (orgCode && orgCode.locationId === branch._id) {
+      await ctx.db.patch("organizationCodes", orgCode._id, { locationId: staff.locationId });
+    }
+    for (const override of availabilityOverrides) {
+      await ctx.db.delete("locationDishAvailability", override._id);
     }
     const counter = await ctx.db
       .query("accountFolioCounters")

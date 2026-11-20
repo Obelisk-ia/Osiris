@@ -3,6 +3,11 @@ import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/s
 import type { Doc } from "./_generated/dataModel";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
 import {
+  loadLocationDishAvailability,
+  resolveDishAvailability,
+  setLocationDishAvailability,
+} from "./model/dishes";
+import {
   accountDisplayLabel,
   closeAccountAndFreeTable,
   computeAccountAmounts,
@@ -346,6 +351,7 @@ export const snapshot = query({
     ).sort((a, b) => b.closedAt - a.closedAt);
 
     const autoSoldOut = location?.autoSoldOut ?? true;
+    const availabilityMap = await loadLocationDishAvailability(ctx, staff.locationId);
     const balanceMap = new Map(balances.map((b) => [b.inventoryItemId, b.quantityMicros] as const));
     const categoryNames = new Map(categories.map((c) => [c._id, c.name] as const));
     const activeCategoryIds = new Set(categories.filter((c) => c.isActive).map((c) => c._id));
@@ -365,14 +371,15 @@ export const snapshot = query({
                 (row) => (balanceMap.get(row.inventoryItemId) ?? 0) <= 0,
               );
             }
+            const isAvailable = resolveDishAvailability(dish, availabilityMap);
             return {
               _id: dish._id,
               name: dish.name,
               categoryName: dish.categoryId ? categoryNames.get(dish.categoryId) ?? "Sin categoría" : "Sin categoría",
               priceCents: dish.priceCents,
-              isAvailable: dish.isAvailable,
+              isAvailable,
               autoSoldOutByInventory,
-              soldOut: !dish.isAvailable || autoSoldOutByInventory,
+              soldOut: !isAvailable || autoSoldOutByInventory,
             };
           }),
       )
@@ -897,7 +904,12 @@ export const toggleDishSoldOut = mutation({
     if (!dish || dish.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos ese platillo.");
     }
-    await ctx.db.patch("dishes", dish._id, { isAvailable: args.isAvailable });
+    await setLocationDishAvailability(ctx, {
+      organizationId: staff.organizationId,
+      locationId: staff.locationId,
+      dishId: dish._id,
+      isAvailable: args.isAvailable,
+    });
     return null;
   },
 });

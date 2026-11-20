@@ -2,6 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { loadMenuBackground } from "./menu";
+import { loadLocationDishAvailability, resolveDishAvailability } from "./model/dishes";
 import { usesAssignedTables } from "../lib/restaurant-roles";
 import { formatFolio, loadAccountPaymentTotals } from "./model/billing";
 import { emitNotification } from "./model/notifications";
@@ -96,6 +97,7 @@ async function loadPublicMenu(
   const activeCategories = categories.filter((c) => c.isActive);
   const activeCategoryIds = new Set(activeCategories.map((c) => c._id));
   const autoSoldOut = location.autoSoldOut ?? true;
+  const availabilityMap = await loadLocationDishAvailability(ctx, location._id);
   const balanceMap = new Map(balances.map((b) => [b.inventoryItemId, b.quantityMicros] as const));
 
   const groupMap = new Map<
@@ -159,7 +161,7 @@ async function loadPublicMenu(
           priceCents: dish.priceCents,
           categoryId: dish.categoryId ?? null,
           photoUrl,
-          soldOut: !dish.isAvailable || soldByInventory,
+          soldOut: !resolveDishAvailability(dish, availabilityMap) || soldByInventory,
           modifierSummaries,
         };
       }),

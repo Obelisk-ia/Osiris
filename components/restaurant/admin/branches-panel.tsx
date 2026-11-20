@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, usePreloadedQuery, type Preloaded } from "convex/react";
-import { Building2, Check, Edit3, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Building2, Check, ChefHat, Edit3, Grid2x2, Plus, Trash2, Users, Wallet } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { api } from "@/convex/_generated/api";
@@ -27,6 +27,7 @@ export function BranchesPanel({ preloaded }: { preloaded: Preloaded<typeof api.a
   const [deletePending, setDeletePending] = useState(false);
 
   const currentBranch = data.branches.find((b) => b._id === data.currentLocationId);
+  const statusMap = new Map(data.branchStatuses.map((s) => [s.locationId, s] as const));
 
   async function confirmDelete() {
     if (!deleteTarget) return;
@@ -63,6 +64,7 @@ export function BranchesPanel({ preloaded }: { preloaded: Preloaded<typeof api.a
         <ul className="az-rows">
           {data.branches.map((branch) => {
             const isCurrent = branch._id === data.currentLocationId;
+            const status = statusMap.get(branch._id);
             return (
               <li key={branch._id}>
                 <div className="az-row-main">
@@ -75,11 +77,51 @@ export function BranchesPanel({ preloaded }: { preloaded: Preloaded<typeof api.a
                           En uso
                         </span>
                       )}
+                      {status && (
+                        <span className={`az-badge ${status.hasOpenShift ? "accent" : ""}`}>
+                          <Wallet aria-hidden="true" />
+                          {status.hasOpenShift ? "Caja abierta" : "Caja cerrada"}
+                        </span>
+                      )}
                     </div>
                     {branch.address && <p className="text-sm text-muted-foreground">{branch.address}</p>}
                     <p className="text-xs text-muted-foreground">
                       {timezoneLabel(branch.timeZone)} · {data.currencyCode}
                     </p>
+                    {status && (
+                      <div className="az-cluster mt-2">
+                        <span className="az-badge">
+                          <Grid2x2 aria-hidden="true" />
+                          Mesas {status.occupiedTables}/{status.totalTables}
+                        </span>
+                        <span className="az-badge">
+                          <Users aria-hidden="true" />
+                          {status.activeStaffCount} {status.activeStaffCount === 1 ? "empleado" : "empleados"}
+                        </span>
+                        {status.openAccounts > 0 && (
+                          <span className="az-badge">
+                            {status.openAccounts} {status.openAccounts === 1 ? "cuenta abierta" : "cuentas abiertas"}
+                          </span>
+                        )}
+                        {status.awaitingPayment > 0 && (
+                          <span className="az-badge warn">
+                            {status.awaitingPayment} por cobrar
+                          </span>
+                        )}
+                        {status.pendingTickets > 0 && (
+                          <span className="az-badge">
+                            <ChefHat aria-hidden="true" />
+                            {status.pendingTickets} en cocina
+                          </span>
+                        )}
+                        {status.lowStockCount > 0 && (
+                          <span className="az-badge danger">
+                            <AlertTriangle aria-hidden="true" />
+                            {status.lowStockCount} insumo{status.lowStockCount === 1 ? "" : "s"} bajo mínimo
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="az-row-actions">
                     {!isCurrent && (

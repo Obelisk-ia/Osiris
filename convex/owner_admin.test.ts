@@ -300,4 +300,151 @@ describe("owner & manager backend suite", () => {
     await owner.mutation(api.admin.removeBranch, { locationId: branch2 });
     expect((await owner.query(api.admin.branchesSnapshot)).branches).toHaveLength(1);
   });
+
+  it("supports multi-franchise signup selection, owner-only branch switching, manager permissions, staff transfers, and per-branch dish availability", async () => {
+    const t = setupRestaurantTest();
+    const { owner, code, registration } = await createRestaurant(t);
+    const branch1 = registration.location._id;
+
+    // Create a second franchise
+    const branch2 = await owner.mutation(api.admin.createBranch, {
+      name: "Sucursal Roma",
+      address: "Calle Colima 80",
+      timeZone: "America/Mexico_City",
+    });
+
+    // Public code lookup returns both franchises and rejects invalid codes
+    const invalidLookup = await t.mutation(api.restaurants.lookupCodeBranches, { code: "INVALID" });
+    expect(invalidLookup).toMatchObject({ found: false });
+
+    const lookup = await t.mutation(api.restaurants.lookupCodeBranches, { code });
+    expect(lookup).toMatchObject({
+      found: true,
+      restaurantName: "Casa Jacaranda",
+    });
+    if (lookup.found) {
+      expect(lookup.branches.map((b) => b._id)).toEqual(expect.arrayContaining([branch1, branch2]));
+    }
+
+    // Employee registers directly into Branch 2 via dropdown selection
+    const romaWaiter = await authenticatedCaller(t, "roma-waiter@example.com");
+    expect(
+      await romaWaiter.mutation(api.restaurants.completeRegistration, {
+        registration: {
+          kind: "staff",
+          displayName: "Sofía",
+          code,
+          roles: ["waiter"],
+          locationId: branch2,
+        },
+      }),
+    ).toMatchObject({ success: true });
+    expect((await romaWaiter.query(api.restaurants.current))?.location._id).toBe(branch2);
+
+    // Reject a locationId from a different organization
+    const otherOrg = await createRestaurant(t, "other-owner@example.com");
+    const forgedBranchStaff = await authenticatedCaller(t, "forged-branch@example.com");
+    expect(
+      await forgedBranchStaff.mutation(api.restaurants.completeRegistration, {
+        registration: {
+          kind: "staff",
+          displayName: "Intruso",
+          code,
+          roles: ["waiter"],
+          locationId: otherOrg.registration.location._id,
+        },
+      }),
+    ).toMatchObject({ success: false, message: expect.stringContaining("no pertenece") });
+
+    // Register a manager and a waiter in Branch 1
+    const mgrCaller = await authenticatedCaller(t, "branch1-mgr@example.com");
+    await mgrCaller.mutation(api.restaurants.completeRegistration, {
+      registration: { kind: "staff", displayName: "Carlos", code, roles: ["waiter"], locationId: branch1 },
+    });
+    const b1WaiterCaller = await authenticatedCaller(t, "branch1-waiter@example.com");
+    await b1WaiterCaller.mutation(api.restaurants.completeRegistration, {
+      registration: { kind: "staff", displayName: "Elena", code, roles: ["waiter"], locationId: branch1 },
+    });
+
+    const b1Members = await owner.query(api.admin.membersSnapshot);
+    const carlos = b1Members.members.find((m) => m.displayName === "Carlos")!;
+    const elena = b1Members.members.find((m) => m.displayName === "Elena")!;
+
+    // Promote Carlos to plain manager (no special permissions yet)
+    await owner.mutation(api.admin.updateMemberRoles, {
+      memberId: carlos._id,
+      roles: ["manager"],
+    });
+
+    // Manager is blocked from branch management & switching
+    await expect(mgrCaller.query(api.admin.branchesSnapshot)).rejects.toThrow(/permiso/);
+    await expect(mgrCaller.mutation(api.admin.switchBranch, { locationId: branch2 })).rejects.toThrow(/permiso/);
+    await expect(
+      mgrCaller.mutation(api.admin.createBranch, { name: "No", timeZone: "America/Mexico_City" }),
+    ).rejects.toThrow(/permiso/);
+
+    // Owner creates a shared dish
+    const dishId = await owner.mutation(api.menu.createDish, {
+      name: "Tacos al Pastor",
+      priceCents: 12000,
+      areas: ["kitchen"],
+      isPublished: true,
+      isAvailable: true,
+      modifierGroupIds: [],
+      recipe: [],
+    });
+
+    // Plain manager can read menu (canEditMenu: false) and toggle local availability,
+    // but cannot create/edit shared menu items or transfer staff
+    const mgrMenuBefore = await mgrCaller.query(api.menu.snapshot);
+    expect(mgrMenuBefore.canEditMenu).toBe(false);
+    await expect(mgrCaller.mutation(api.menu.createCategory, { name: "Entradas" })).rejects.toThrow(
+      /autorizado/,
+    );
+    await expect(
+      mgrCaller.mutation(api.admin.transferMemberBranch, {
+        memberId: elena._id,
+        targetLocationId: branch2,
+      }),
+    ).rejects.toThrow(/permiso/);
+
+    // Toggling dish availability in Branch 1 does NOT affect Branch 2
+    await mgrCaller.mutation(api.menu.toggleDishAvailable, { dishId });
+    expect((await mgrCaller.query(api.menu.snapshot)).dishes[0].isAvailable).toBe(false);
+
+    await owner.mutation(api.admin.switchBranch, { locationId: branch2 });
+    expect((await owner.query(api.menu.snapshot)).dishes[0].isAvailable).toBe(true);
+    await owner.mutation(api.admin.switchBranch, { locationId: branch1 });
+
+    // Owner grants Carlos both special permissions (edit_menu + transfer_staff)
+    await owner.mutation(api.admin.updateMemberRoles, {
+      memberId: carlos._id,
+      roles: ["manager"],
+      managerPermissions: ["edit_menu", "transfer_staff"],
+    });
+
+    // Now Carlos can edit the shared menu AND transfer Elena to Branch 2
+    expect((await mgrCaller.query(api.menu.snapshot)).canEditMenu).toBe(true);
+    await mgrCaller.mutation(api.menu.createCategory, { name: "Entradas" });
+    await mgrCaller.mutation(api.admin.transferMemberBranch, {
+      memberId: elena._id,
+      targetLocationId: branch2,
+    });
+    expect((await b1WaiterCaller.query(api.restaurants.current))?.location._id).toBe(branch2);
+
+    // Manager still cannot transfer themselves
+    await expect(
+      mgrCaller.mutation(api.admin.transferMemberBranch, {
+        memberId: carlos._id,
+        targetLocationId: branch2,
+      }),
+    ).rejects.toThrow(/ti mismo/);
+
+    // Owner branch status overview reflects live staff counts across both branches
+    const overview = await owner.query(api.admin.branchesSnapshot);
+    const status1 = overview.branchStatuses.find((s) => s.locationId === branch1)!;
+    const status2 = overview.branchStatuses.find((s) => s.locationId === branch2)!;
+    expect(status1.activeStaffCount).toBe(1); // Carlos (owner excluded from employee count)
+    expect(status2.activeStaffCount).toBe(2); // Sofía + Elena
+  });
 });

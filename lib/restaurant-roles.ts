@@ -9,8 +9,51 @@ export const operationalRoles = [
 
 export type OperationalRole = typeof operationalRoles[number]["value"];
 export type StaffRole = OperationalRole | "owner" | "manager";
+export type ManagerPermission = "edit_menu" | "transfer_staff";
 export type KitchenRole = "chef" | "bar" | "bartender" | "barista";
 export type PreparationArea = "kitchen" | "bar" | "cocktails" | "coffee";
+
+export const managerPermissionOptions: readonly {
+  value: ManagerPermission;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: "edit_menu",
+    label: "Editar menú compartido",
+    hint: "Crear, editar y eliminar platillos, categorías, modificadores y apariencia del menú.",
+  },
+  {
+    value: "transfer_staff",
+    label: "Cambiar personal de sucursal",
+    hint: "Mover integrantes de su sucursal hacia otra sucursal del restaurante.",
+  },
+] as const;
+
+export const managerPermissionLabels: Record<ManagerPermission, string> = {
+  edit_menu: "Edita menú",
+  transfer_staff: "Cambia sucursales",
+};
+
+export function canEditSharedMenu(staff: {
+  roles: readonly StaffRole[];
+  managerPermissions?: readonly ManagerPermission[];
+}) {
+  return (
+    staff.roles.includes("owner") ||
+    (staff.roles.includes("manager") && Boolean(staff.managerPermissions?.includes("edit_menu")))
+  );
+}
+
+export function canTransferStaff(staff: {
+  roles: readonly StaffRole[];
+  managerPermissions?: readonly ManagerPermission[];
+}) {
+  return (
+    staff.roles.includes("owner") ||
+    (staff.roles.includes("manager") && Boolean(staff.managerPermissions?.includes("transfer_staff")))
+  );
+}
 
 export const serviceModes = [
   { value: "a_la_carte", label: "Solo a la carta", description: "Comandas por mesa, sin servicio de buffet." },
