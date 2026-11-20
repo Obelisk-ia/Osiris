@@ -15,7 +15,7 @@ export default defineConfig({
     },
   }],
   test: {
-    include: ["convex/**/*.test.ts"],
+    include: ["convex/**/*.test.ts", "lib/**/*.test.ts"],
     environment: "edge-runtime",
     server: { deps: { inline: ["convex-test", "password-hash-wasm"] } },
   },

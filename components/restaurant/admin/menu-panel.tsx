@@ -16,7 +16,7 @@ import {
   Utensils,
 } from "lucide-react";
 import Link from "next/link";
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,7 @@ import {
   toMicros,
   UNIT_SHORT,
 } from "@/lib/format";
+import { uploadCompressedImage, validateImageFile } from "@/lib/image-upload";
 import { AdminModal, AdminPageHead, ConfirmModal, EmptyState, ToastBanner, useToast } from "./admin-ui";
 import { MenuAppearancePanel } from "./menu-appearance-panel";
 
@@ -684,15 +685,19 @@ function DishModal({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
+  useEffect(() => {
+    if (!photoPreviewUrl || !photoPreviewUrl.startsWith("blob:")) return;
+    return () => {
+      URL.revokeObjectURL(photoPreviewUrl);
+    };
+  }, [photoPreviewUrl]);
+
   function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setError("Selecciona un archivo de imagen (JPG, PNG o WebP).");
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      setError("La foto debe pesar menos de 5 MB.");
+    const validationError = validateImageFile(file, "dish");
+    if (validationError) {
+      setError(validationError);
       return;
     }
     setError(null);
@@ -731,16 +736,12 @@ function DishModal({
     try {
       let uploadedPhotoId: Id<"_storage"> | undefined = undefined;
       if (photoFile) {
-        const uploadUrl = await generateUploadUrl();
-        const res = await fetch(uploadUrl, {
-          method: "POST",
-          headers: { "Content-Type": photoFile.type },
-          body: photoFile,
+        const uploaded = await uploadCompressedImage({
+          file: photoFile,
+          preset: "dish",
+          generateUploadUrl,
         });
-        if (!res.ok) throw new Error("No pudimos subir la foto.");
-        const json = (await res.json()) as { storageId?: string };
-        if (!json.storageId) throw new Error("Respuesta inesperada al subir la foto.");
-        uploadedPhotoId = json.storageId as Id<"_storage">;
+        uploadedPhotoId = uploaded.storageId;
       }
 
       await onSave({
@@ -874,7 +875,7 @@ function DishModal({
               <input
                 id="dish-photo"
                 type="file"
-                accept="image/jpeg,image/png,image/webp"
+                accept="image/jpeg,image/png,image/webp,image/avif"
                 className="sr-only"
                 onChange={handleFileChange}
               />
@@ -892,7 +893,9 @@ function DishModal({
                   Quitar foto
                 </Button>
               )}
-              <span className="text-xs text-muted-foreground">JPG, PNG o WebP hasta 5 MB.</span>
+              <span className="text-xs text-muted-foreground">
+                JPG, PNG, WebP o AVIF hasta 12 MB (se optimiza automáticamente sin perder nitidez).
+              </span>
             </div>
           </div>
         </div>
