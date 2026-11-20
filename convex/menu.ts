@@ -31,7 +31,12 @@ function backgroundImageType(bytes: ArrayBuffer) {
   if (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff) return "image/jpeg";
   if (String.fromCharCode(...prefix.slice(0, 4)) === "RIFF" &&
       String.fromCharCode(...prefix.slice(8, 12)) === "WEBP") return "image/webp";
-  throw new ConvexError("Elige una imagen JPG, PNG o WebP válida.");
+  // AVIF files use an ISO BMFF box: "ftyp" at offset 4 followed by the major brand.
+  if (prefix.length >= 12 && String.fromCharCode(...prefix.slice(4, 8)) === "ftyp") {
+    const brand = String.fromCharCode(...prefix.slice(8, 12));
+    if (brand === "avif" || brand === "avis") return "image/avif";
+  }
+  throw new ConvexError("Elige una imagen JPG, PNG, WebP o AVIF válida.");
 }
 
 export const updateMenuBackground = mutation({

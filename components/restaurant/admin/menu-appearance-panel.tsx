@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { api } from "@/convex/_generated/api";
 import { errorMessage } from "@/lib/format";
 import { MAX_MENU_BACKGROUND_BYTES, type MenuBackground } from "@/lib/menu-appearance";
+import { compressImageForUpload, validateImageFile } from "@/lib/image-upload";
 import { ToastBanner, useToast } from "./admin-ui";
 
 const DEFAULT_COLOR = "#9eac86";
@@ -44,13 +45,13 @@ export function MenuAppearancePanel({
   function selectPhoto(file?: File) {
     setPhoto(null);
     setError(null);
-    if (file && !["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-      setError("Elige una imagen JPG, PNG o WebP.");
-    } else if (file && file.size > MAX_MENU_BACKGROUND_BYTES) {
-      setError("La imagen debe pesar hasta 3 MB.");
-    } else if (file) {
-      setPhoto({ file, url: URL.createObjectURL(file) });
+    if (!file) return;
+    const validationError = validateImageFile(file, "menuBackground");
+    if (validationError) {
+      setError(validationError);
+      return;
     }
+    setPhoto({ file, url: URL.createObjectURL(file) });
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -61,7 +62,13 @@ export function MenuAppearancePanel({
     try {
       if (kind === "photo") {
         if (!photo) return;
-        await saveBackground({ background: { kind, bytes: await photo.file.arrayBuffer() } });
+        // Compress in the browser (WebP, max 1200px, high quality) before the bytes
+        // are sent to Convex storage, so the QR menu loads fast on diners' phones.
+        const compressed = await compressImageForUpload(photo.file, "menuBackground");
+        if (compressed.compressedBytes > MAX_MENU_BACKGROUND_BYTES) {
+          throw new Error("La imagen optimizada sigue pesando más de 3 MB; prueba una foto más liviana.");
+        }
+        await saveBackground({ background: { kind, bytes: await compressed.file.arrayBuffer() } });
       } else {
         await saveBackground({ background: kind === "color" ? { kind, color } : { kind } });
       }
@@ -113,7 +120,7 @@ export function MenuAppearancePanel({
                   id="menu-background-photo"
                   type="file"
                   className="peer sr-only"
-                  accept="image/jpeg,image/png,image/webp"
+                  accept="image/jpeg,image/png,image/webp,image/avif"
                   aria-describedby="menu-background-photo-hint"
                   onChange={(event) => {
                     selectPhoto(event.currentTarget.files?.[0]);
@@ -126,7 +133,7 @@ export function MenuAppearancePanel({
                 {photo && <span className="break-all text-sm" role="status">{photo.file.name}</span>}
               </div>
               <p id="menu-background-photo-hint" className="text-xs text-muted-foreground">
-                JPG, PNG o WebP de hasta 3 MB. La imagen se suaviza para facilitar la lectura.
+                JPG, PNG, WebP o AVIF de hasta 15 MB. Se convierte a WebP optimizada (máx. 1200 px, alta calidad) para que la carta cargue rápido.
               </p>
             </div>
           )}

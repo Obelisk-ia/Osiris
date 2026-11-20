@@ -16,6 +16,17 @@ pnpm typecheck
 pnpm lint
 ```
 
+### Prueba de fotos del menú en Chromium (Playwright)
+
+Con `.env.local` apuntando a **Convex de desarrollo**, ejecuta:
+
+```sh
+pnpm exec playwright install chromium
+OSIRIS_TEST_LIVE_SIGNUP=1 pnpm test:dev image-uploads.spec.ts
+```
+
+Crea una cuenta y un restaurante de prueba, sube fotos de platillo y fondo, y verifica el formato, las dimensiones y el peso de las imágenes que recibe un comensal. El JPEG de prueba se genera a partir de un recurso local; puedes usar otro JPEG de más de 1200 px con `OSIRIS_TEST_IMAGE_JPEG=/ruta/foto.jpg`. Si ya tienes `next dev` en el puerto 3000, añade `OSIRIS_TEST_PORT=3000` para reutilizarlo.
+
 ### Levantar la aplicación en local
 
 En una primera terminal (sincroniza esquema y funciones de Convex):

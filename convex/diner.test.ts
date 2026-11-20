@@ -24,7 +24,7 @@ describe("public QR diner menu, call waiter, and delivery-gated requestBill", ()
 
     const invalidImage = new TextEncoder().encode("<svg/>").buffer;
     await expect(owner.mutation(api.menu.updateMenuBackground, { background: { kind: "photo", bytes: invalidImage } }))
-      .rejects.toThrow(/imagen JPG, PNG o WebP/);
+      .rejects.toThrow(/imagen JPG, PNG, WebP o AVIF/);
     expect(await t.query(api.diner.publicMenu, args)).toMatchObject({ menuBackground: background });
 
     await owner.mutation(api.menu.updateMenuBackground, { background: { kind: "default" } });
