@@ -12,6 +12,17 @@ export type StaffRole = OperationalRole | "owner" | "manager";
 export type KitchenRole = "chef" | "bar" | "bartender" | "barista";
 export type PreparationArea = "kitchen" | "bar" | "cocktails" | "coffee";
 
+export const serviceModes = [
+  { value: "a_la_carte", label: "Solo a la carta", description: "Comandas por mesa, sin servicio de buffet." },
+  { value: "buffet", label: "Solo buffet", description: "Reposiciones como vista principal y comandas para los extras que autorices." },
+  { value: "mixed", label: "Mixto", description: "Servicio de buffet y carta completa." },
+] as const;
+export type ServiceMode = (typeof serviceModes)[number]["value"];
+
+export function usesAssignedTables(location: { serviceMode: ServiceMode; buffetTableService?: boolean }) {
+  return location.serviceMode !== "buffet" || location.buffetTableService !== false;
+}
+
 export const roleLabels: Record<StaffRole, string> = {
   owner: "Dueño",
   manager: "Gerente",
@@ -31,6 +42,10 @@ export const PREPARATION_AREAS: readonly PreparationArea[] = [
   "cocktails",
   "coffee",
 ] as const;
+
+export function locationPreparationAreas(configured: readonly PreparationArea[] | undefined) {
+  return PREPARATION_AREAS.filter((area) => !configured?.length || configured.includes(area));
+}
 
 export const PREPARATION_AREA_META: Record<
   PreparationArea,
@@ -102,7 +117,7 @@ export const workspaces = [
   { value: "mesas", label: "Mesas", description: "El salón y las mesas que atiendes.", roles: ["waiter", "cashier"] },
   { value: "cocina", label: "Cocina y estaciones", description: "La preparación de cada pedido por área.", roles: ["chef", "bar", "bartender", "barista"] },
   { value: "caja", label: "Caja", description: "Cobros, turnos, cortes e historial.", roles: ["cashier"] },
-  { value: "buffet", label: "Buffet", description: "Los menús y el servicio de buffet.", roles: ["waiter", "chef", "bar", "bartender", "barista"] },
+  { value: "buffet", label: "Buffet", description: "Los menús y el servicio de buffet.", roles: ["waiter"] },
 ] as const;
 export type Workspace = typeof workspaces[number]["value"];
 

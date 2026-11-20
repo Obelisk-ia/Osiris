@@ -29,7 +29,7 @@ export function SignUpForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [details, setDetails] = useState<RegistrationDetails>({
-    kind: "owner", displayName: "", restaurantName: "", code: "", roles: [],
+    kind: "owner", displayName: "", restaurantName: "", serviceMode: "a_la_carte", code: "", roles: [],
   });
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -63,7 +63,7 @@ export function SignUpForm() {
       client.setAuth(accessToken);
       const result = await client.mutation(api.restaurants.completeRegistration, {
         registration: details.kind === "owner"
-          ? { kind: "owner", displayName: details.displayName, restaurantName: details.restaurantName }
+          ? { kind: "owner", displayName: details.displayName, restaurantName: details.restaurantName, serviceMode: details.serviceMode }
           : { kind: "staff", displayName: details.displayName, code: details.code, roles: details.roles },
       });
       if (!result.success) {

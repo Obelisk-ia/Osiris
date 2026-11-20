@@ -353,6 +353,7 @@ export function CashierPanel({
                               discountCents: acc.discountCents,
                               paidCents: acc.paidCents,
                               balanceCents: acc.balanceCents,
+                              buffetGuestCount: acc.buffetGuestCount,
                               reportedPayment: acc.reportedPayment,
                             })
                           }
@@ -405,8 +406,9 @@ export function CashierPanel({
                           )}
                         </div>
                         <span className="text-xs text-muted-foreground">
-                          Folio A-{String(acc.folio).padStart(4, "0")} · {acc.itemCount}{" "}
-                          {acc.itemCount === 1 ? "producto" : "productos"}
+                          Folio A-{String(acc.folio).padStart(4, "0")}
+                          {acc.buffetGuestCount > 0 && ` · ${acc.buffetGuestCount} ${acc.buffetGuestCount === 1 ? "entrada" : "entradas"} de buffet`}
+                          {acc.itemCount > 0 && ` · ${acc.itemCount} ${acc.itemCount === 1 ? "producto" : "productos"}`}
                           {acc.assignedStaffName ? ` · Mesero: ${acc.assignedStaffName}` : ""}
                         </span>
                       </div>
@@ -433,6 +435,7 @@ export function CashierPanel({
                               discountCents: acc.discountCents,
                               paidCents: acc.paidCents,
                               balanceCents: acc.balanceCents,
+                              buffetGuestCount: acc.buffetGuestCount,
                             })
                           }
                         >

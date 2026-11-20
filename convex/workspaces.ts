@@ -67,7 +67,7 @@ export const snapshot = query({
         id: account._id, title: `Cuenta ${account.folio}`,
         detail: new Intl.NumberFormat("es-MX", { style: "currency", currency: restaurant.currencyCode }).format(account.totalCents / 100),
       });
-    } else {
+    } else if (location.serviceMode !== "a_la_carte") {
       const menus = await ctx.db.query("buffetMenus")
         .withIndex("by_locationId_and_isActive_and_menuDate", (q) =>
           q.eq("locationId", staff.locationId).eq("isActive", true)).order("desc").take(50);

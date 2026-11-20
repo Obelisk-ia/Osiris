@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { requireStaff } from "./model/access";
-import { consumeRecipe } from "./model/inventory";
+import { buffetBatchIngredients, consumeRecipe } from "./model/inventory";
 import {
   resolveStationRole,
   syncOrderAndAccountTable,
@@ -78,9 +78,10 @@ export const startBuffetBatch = internalMutation({
     if (!menuDish || menuDish.organizationId !== staff.organizationId || menuDish.locationId !== staff.locationId) throw new ConvexError("El platillo no pertenece a este menú de buffet.");
     if (batch.status !== "ordered") return null;
     if (batch.inventoryConsumedAt !== undefined) throw new ConvexError("El inventario de este lote ya se consumió.");
-    await consumeRecipe(ctx, staff, batch.dishId, batch.portions, `buffet-batch:${batch._id}`);
+    const now = Date.now();
     await ctx.db.patch("buffetBatches", batchId, {
-      status: "preparing", inventoryConsumedAt: Date.now(), startedByStaffId: staff._id, updatedAt: Date.now(),
+      ...await buffetBatchIngredients(ctx, staff, batch, now),
+      status: "preparing", updatedAt: now,
     });
     return null;
   },

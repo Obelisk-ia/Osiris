@@ -64,14 +64,14 @@ export function KitchenShell({
   const staffName = live?.staff.displayName ?? initialStaffName;
   const roles = (live?.staff.roles ?? initialRoles) as readonly StaffRole[];
   const roleLabel = formatRoles(roles).join(" · ");
-  const stationAreas = areasForStaffRoles(roles);
+  const stationAreas = kitchenSnap?.allowedAreas.map(({ area }) => area) ?? areasForStaffRoles(roles);
   const stationTitle =
     stationAreas.length === 1
       ? PREPARATION_AREA_META[stationAreas[0]].name
       : "Pedidos por estación";
 
-  const newTicketCount =
-    kitchenSnap?.tickets.filter((t) => t.hasPending).length ?? 0;
+  const newTicketCount = (kitchenSnap?.tickets.filter((t) => t.hasPending).length ?? 0) +
+    (kitchenSnap?.replenishments.filter((batch) => batch.status === "ordered").length ?? 0);
 
   useEffect(() => {
     if (!accountMenuOpen) return;

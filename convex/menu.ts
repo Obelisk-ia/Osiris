@@ -3,11 +3,11 @@ import schema from "./schema";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
-import { preparationArea } from "./model/validators";
+import { resolveDishAreas } from "./model/orders";
+import { preparationArea, serviceMode } from "./model/validators";
+import { locationPreparationAreas, PREPARATION_AREAS, type PreparationArea } from "../lib/restaurant-roles";
 
 const EDITORS = ["owner", "manager"] as const;
-const ALL_AREAS = ["kitchen", "bar", "cocktails", "coffee"] as const;
-type PreparationArea = (typeof ALL_AREAS)[number];
 const unitValidator = v.union(v.literal("g"), v.literal("ml"), v.literal("each"));
 
 async function editor(ctx: MutationCtx | QueryCtx) {
@@ -15,23 +15,7 @@ async function editor(ctx: MutationCtx | QueryCtx) {
 }
 
 function normalizeAreas(raw: readonly PreparationArea[]): PreparationArea[] {
-  const picked = new Set(raw);
-  return ALL_AREAS.filter((area) => picked.has(area));
-}
-
-function resolveEnabledAreas(location: Doc<"locations"> | null): PreparationArea[] {
-  if (!location?.enabledPreparationAreas || location.enabledPreparationAreas.length === 0) {
-    return [...ALL_AREAS];
-  }
-  const normalized = normalizeAreas(location.enabledPreparationAreas);
-  return normalized.length > 0 ? normalized : [...ALL_AREAS];
-}
-
-function resolveDishAreas(dish: Doc<"dishes">): PreparationArea[] {
-  if (dish.areas && dish.areas.length > 0) {
-    return normalizeAreas(dish.areas);
-  }
-  return dish.area === "barra" ? ["bar"] : ["kitchen"];
+  return PREPARATION_AREAS.filter((area) => raw.includes(area));
 }
 
 const recipeEntryView = v.object({
@@ -50,6 +34,7 @@ const dishView = v.object({
   priceCents: v.number(),
   isAvailable: v.boolean(),
   isPublished: v.boolean(),
+  buffetExtra: v.boolean(),
   areas: v.array(preparationArea),
   categoryId: v.union(v.id("dishCategories"), v.null()),
   categoryName: v.union(v.string(), v.null()),
@@ -96,6 +81,7 @@ export const snapshot = query({
     restaurantName: v.string(),
     locationName: v.string(),
     currencyCode: v.string(),
+    serviceMode,
     autoSoldOut: v.boolean(),
     enabledAreas: v.array(preparationArea),
     categories: v.array(schema.doc("dishCategories")),
@@ -175,6 +161,7 @@ export const snapshot = query({
           isAvailable: dish.isAvailable,
           isPublished: dish.isPublished ?? true,
           areas: resolveDishAreas(dish),
+          buffetExtra: dish.buffetExtra ?? false,
           categoryId: dish.categoryId ?? null,
           categoryName: dish.categoryId ? categoryMap.get(dish.categoryId) ?? null : null,
           photoId: dish.photoId ?? null,
@@ -248,7 +235,8 @@ export const snapshot = query({
       locationName: location?.name ?? "Sucursal principal",
       currencyCode: restaurant?.currencyCode ?? "MXN",
       autoSoldOut,
-      enabledAreas: resolveEnabledAreas(location),
+      enabledAreas: locationPreparationAreas(location?.enabledPreparationAreas),
+      serviceMode: location?.serviceMode ?? "mixed",
       categories,
       dishes: dishViews,
       modifierGroups: modifierGroupViews,
@@ -269,7 +257,7 @@ export const setPreparationAreaEnabled = mutation({
     if (!location || location.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos tu sucursal.");
     }
-    const current = new Set(resolveEnabledAreas(location));
+    const current = new Set(locationPreparationAreas(location.enabledPreparationAreas));
     if (args.enabled) current.add(args.area);
     else current.delete(args.area);
     const next = normalizeAreas([...current]);
@@ -469,6 +457,7 @@ export const createDish = mutation({
     categoryId: v.optional(v.id("dishCategories")),
     areas: v.array(preparationArea),
     isPublished: v.boolean(),
+    buffetExtra: v.optional(v.boolean()),
     isAvailable: v.boolean(),
     photoId: v.optional(v.id("_storage")),
     modifierGroupIds: v.array(v.id("modifierGroups")),
@@ -499,6 +488,7 @@ export const createDish = mutation({
       area: areas.includes("kitchen") ? "cocina" : "barra",
       areas,
       isPublished: args.isPublished,
+      buffetExtra: args.buffetExtra,
       isAvailable: args.isAvailable,
       photoId: args.photoId,
     });
@@ -516,6 +506,7 @@ export const updateDish = mutation({
     categoryId: v.optional(v.id("dishCategories")),
     areas: v.array(preparationArea),
     isPublished: v.boolean(),
+    buffetExtra: v.optional(v.boolean()),
     isAvailable: v.boolean(),
     photoId: v.optional(v.id("_storage")),
     removePhoto: v.optional(v.boolean()),
@@ -560,6 +551,7 @@ export const updateDish = mutation({
       area: areas.includes("kitchen") ? "cocina" : "barra",
       areas,
       isPublished: args.isPublished,
+      buffetExtra: args.buffetExtra ?? dish.buffetExtra,
       isAvailable: args.isAvailable,
       photoId: nextPhotoId,
     });

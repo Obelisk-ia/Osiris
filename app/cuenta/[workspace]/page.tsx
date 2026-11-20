@@ -1,9 +1,10 @@
-import { fetchQuery, preloadQuery } from "convex/nextjs";
+import { fetchQuery, preloadQuery, preloadedQueryResult } from "convex/nextjs";
 import { notFound, redirect } from "next/navigation";
 import { Suspense } from "react";
 import { api } from "@/convex/_generated/api";
 import { Brand } from "@/components/brand";
 import { AdminShell } from "@/components/restaurant/admin/admin-shell";
+import { BuffetServicePanel } from "@/components/restaurant/buffet/buffet-service-panel";
 import { CashierPanel } from "@/components/restaurant/cashier/cashier-panel";
 import { CashierShell } from "@/components/restaurant/cashier/cashier-shell";
 import { FloorPanel } from "@/components/restaurant/floor/floor-panel";
@@ -13,7 +14,7 @@ import { WaiterShell } from "@/components/restaurant/waiter/waiter-shell";
 import { WaiterTablesPanel } from "@/components/restaurant/waiter/waiter-tables-panel";
 import { WorkspacePanel } from "@/components/restaurant/workspace-panel";
 import { convexAuthNextjsAccessToken, isAuthenticatedNextjs } from "@/lib/convex-auth";
-import { canAccessWorkspace, workspaces, type StaffRole } from "@/lib/restaurant-roles";
+import { canAccessWorkspace, usesAssignedTables, workspaces, type StaffRole } from "@/lib/restaurant-roles";
 
 async function WorkspaceContent({ params }: { params: Promise<{ workspace: string }> }) {
   const { workspace } = await params;
@@ -28,42 +29,38 @@ async function WorkspaceContent({ params }: { params: Promise<{ workspace: strin
   const isAdmin = registration.staff.roles.some((role) => role === "owner" || role === "manager");
   const isWaiter = registration.staff.roles.includes("waiter");
   const isCashier = registration.staff.roles.includes("cashier");
+  const shellProps = {
+    initialRestaurantName: registration.restaurant.name,
+    initialLocationName: registration.location.name,
+    initialStaffName: registration.staff.displayName,
+    initialRoles: registration.staff.roles as StaffRole[],
+    initialServiceMode: registration.location.serviceMode,
+    initialBuffetTableService: registration.location.buffetTableService,
+  };
 
   if (definition.value === "mesas") {
     if (isAdmin) {
       const floor = await preloadQuery(api.floor.snapshot, {}, options);
       return (
-        <AdminShell
-          initialRestaurantName={registration.restaurant.name}
-          initialLocationName={registration.location.name}
-          initialStaffName={registration.staff.displayName}
-          initialRoles={registration.staff.roles as StaffRole[]}
-        >
-          <FloorPanel preloaded={floor} embedded locationName={registration.location.name} />
+        <AdminShell {...shellProps}>
+          <FloorPanel preloaded={floor} embedded locationName={registration.location.name}
+            allowBuffetSeating={registration.location.serviceMode === "buffet" && usesAssignedTables(registration.location)} />
         </AdminShell>
       );
     }
     if (isCashier && !isWaiter) {
       const floor = await preloadQuery(api.floor.snapshot, {}, options);
       return (
-        <CashierShell
-          initialRestaurantName={registration.restaurant.name}
-          initialLocationName={registration.location.name}
-          initialStaffName={registration.staff.displayName}
-          initialRoles={registration.staff.roles as StaffRole[]}
-        >
+        <CashierShell {...shellProps}>
           <FloorPanel preloaded={floor} embedded locationName={registration.location.name} />
         </CashierShell>
       );
     }
     const waiterTables = await preloadQuery(api.waiter.tablesSnapshot, {}, options);
+    const tables = preloadedQueryResult(waiterTables);
+    if (!tables.tableServiceEnabled && tables.busyTables.length === 0) redirect("/cuenta/buffet");
     return (
-      <WaiterShell
-        initialRestaurantName={registration.restaurant.name}
-        initialLocationName={registration.location.name}
-        initialStaffName={registration.staff.displayName}
-        initialRoles={registration.staff.roles as StaffRole[]}
-      >
+      <WaiterShell {...shellProps}>
         <WaiterTablesPanel preloaded={waiterTables} />
       </WaiterShell>
     );
@@ -73,23 +70,13 @@ async function WorkspaceContent({ params }: { params: Promise<{ workspace: strin
     const cashier = await preloadQuery(api.cashier.snapshot, {}, options);
     if (isAdmin) {
       return (
-        <AdminShell
-          initialRestaurantName={registration.restaurant.name}
-          initialLocationName={registration.location.name}
-          initialStaffName={registration.staff.displayName}
-          initialRoles={registration.staff.roles as StaffRole[]}
-        >
+        <AdminShell {...shellProps}>
           <CashierPanel preloaded={cashier} pageIndex={3} pageTotal={10} />
         </AdminShell>
       );
     }
     return (
-      <CashierShell
-        initialRestaurantName={registration.restaurant.name}
-        initialLocationName={registration.location.name}
-        initialStaffName={registration.staff.displayName}
-        initialRoles={registration.staff.roles as StaffRole[]}
-      >
+      <CashierShell {...shellProps}>
         <CashierPanel preloaded={cashier} pageIndex={1} pageTotal={3} />
       </CashierShell>
     );
@@ -99,25 +86,26 @@ async function WorkspaceContent({ params }: { params: Promise<{ workspace: strin
     const kitchen = await preloadQuery(api.kitchen.snapshot, {}, options);
     if (isAdmin) {
       return (
-        <AdminShell
-          initialRestaurantName={registration.restaurant.name}
-          initialLocationName={registration.location.name}
-          initialStaffName={registration.staff.displayName}
-          initialRoles={registration.staff.roles as StaffRole[]}
-        >
+        <AdminShell {...shellProps}>
           <KitchenPanel preloaded={kitchen} />
         </AdminShell>
       );
     }
     return (
-      <KitchenShell
-        initialRestaurantName={registration.restaurant.name}
-        initialLocationName={registration.location.name}
-        initialStaffName={registration.staff.displayName}
-        initialRoles={registration.staff.roles as StaffRole[]}
-      >
+      <KitchenShell {...shellProps}>
         <KitchenPanel preloaded={kitchen} />
       </KitchenShell>
+    );
+  }
+
+  if (definition.value === "buffet") {
+    if (registration.location.serviceMode === "a_la_carte" &&
+        !(await fetchQuery(api.buffet.hasOpenReplenishments, {}, options))) redirect("/cuenta/mesas");
+    const Shell = isAdmin ? AdminShell : WaiterShell;
+    return (
+      <Shell {...shellProps}>
+        <BuffetServicePanel timeZone={registration.location.timeZone} isAdmin={isAdmin} />
+      </Shell>
     );
   }
 

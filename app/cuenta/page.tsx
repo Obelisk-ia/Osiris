@@ -27,7 +27,7 @@ async function AccountContent() {
         (role) => role === "owner" || role === "manager" || role === "waiter",
       )
     ) {
-      redirect("/cuenta/mesas");
+      redirect(registration.location.serviceMode === "buffet" ? "/cuenta/buffet" : "/cuenta/mesas");
     }
     if (registration.staff.roles.includes("cashier")) {
       redirect("/cuenta/caja");

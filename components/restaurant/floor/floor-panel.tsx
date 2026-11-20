@@ -56,10 +56,12 @@ export function FloorPanel({
   preloaded,
   embedded = false,
   locationName,
+  allowBuffetSeating = false,
 }: {
   preloaded: Preloaded<typeof api.floor.snapshot>;
   embedded?: boolean;
   locationName?: string;
+  allowBuffetSeating?: boolean;
 }) {
   const view = usePreloadedQuery(preloaded);
   const router = useRouter();
@@ -714,6 +716,8 @@ export function FloorPanel({
                                 setEditor({ kind: "table", id: table._id });
                               } else if (table.currentAccountId) {
                                 router.push(`/cuenta/mesero/cuenta/${table.currentAccountId}`);
+                              } else if (allowBuffetSeating && table.status === "empty") {
+                                router.push(`/cuenta/mesero/mesa/${table._id}`);
                               }
                             }}
                             onPointerDown={(e) => startTableDrag(e, table)}

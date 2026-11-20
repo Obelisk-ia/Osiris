@@ -35,10 +35,12 @@ function MenuCatalog({
   categories,
   dishes,
   currencyCode,
+  buffetOnly,
 }: {
   categories: readonly DinerCategory[];
   dishes: readonly DinerDish[];
   currencyCode: string;
+  buffetOnly: boolean;
 }) {
   const [search, setSearch] = useState("");
   const [activeCat, setActiveCat] = useState<string>("all");
@@ -77,7 +79,7 @@ function MenuCatalog({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar platillo o bebida"
-            aria-label="Buscar en la carta"
+            aria-label={buffetOnly ? "Buscar extras" : "Buscar en la carta"}
           />
         </div>
       </div>
@@ -177,7 +179,7 @@ function MenuCatalog({
       ) : (
         <EmptyState
           icon={<Utensils className="size-7" aria-hidden="true" />}
-          title={dishes.length === 0 ? "La carta aún se está preparando" : "Sin coincidencias"}
+          title={dishes.length > 0 ? "Sin coincidencias" : buffetOnly ? "Sin extras disponibles" : "La carta aún se está preparando"}
           description={
             dishes.length === 0
               ? "Pide a tu mesero las recomendaciones del día."
@@ -210,6 +212,8 @@ export function PublicMenuView({
     );
   }
 
+  const buffetOnly = data.serviceMode === "buffet";
+
   return (
     <div className="relative min-h-svh overflow-x-clip">
       <div className="az-backdrop" aria-hidden="true">
@@ -225,18 +229,18 @@ export function PublicMenuView({
             · {data.locationName}
           </span>
         </div>
-        <span className="az-badge">Carta digital</span>
+        <span className="az-badge">{buffetOnly ? "Buffet" : "Carta digital"}</span>
       </header>
 
       <main className="relative z-10 mx-auto max-w-5xl px-5 py-8 pb-16 grid gap-6">
         <header className="az-page-head">
           <p className="restaurant-eyebrow">{data.restaurantName} · {data.locationName}</p>
           <h1 className="editorial-title">
-            La <em>carta</em><span className="coral-dot">.</span>
+            {buffetOnly ? <>Extras del <em>buffet</em></> : <>La <em>carta</em></>}<span className="coral-dot">.</span>
           </h1>
           <p>
-            Consulta nuestros platillos, opciones y disponibilidad en vivo. Para pedir o solicitar
-            tu cuenta, escanea el código QR de tu mesa.
+            {buffetOnly ? "Consulta los productos que puedes pedir por separado." : "Consulta nuestros platillos, opciones y disponibilidad en vivo."}{" "}
+            Para pedir o solicitar tu cuenta, escanea el código QR de tu mesa.
           </p>
         </header>
 
@@ -244,6 +248,7 @@ export function PublicMenuView({
           categories={data.categories}
           dishes={data.dishes}
           currencyCode={data.currencyCode}
+          buffetOnly={buffetOnly}
         />
       </main>
     </div>
@@ -303,6 +308,8 @@ export function DinerTableView({
   }
 
   const account = data.account;
+  const admission = account?.buffetAdmission;
+  const buffetOnly = data.serviceMode === "buffet";
 
   async function handleCallWaiter() {
     if (calling) return;
@@ -378,7 +385,7 @@ export function DinerTableView({
               onClick={() => setTab("carta")}
             >
               <BookOpen className="size-4" aria-hidden="true" />
-              <span>La carta</span>
+              <span>{buffetOnly ? "Extras" : "La carta"}</span>
             </button>
             <button
               type="button"
@@ -405,11 +412,10 @@ export function DinerTableView({
                 {data.table.tableNumber} · {data.table.sectionName}
               </p>
               <h1 className="editorial-title">
-                La <em>carta</em><span className="coral-dot">.</span>
+                {buffetOnly ? <>Extras del <em>buffet</em></> : <>La <em>carta</em></>}<span className="coral-dot">.</span>
               </h1>
               <p>
-                Explora el menú en vivo. Cuando estés listo para ordenar, llama a tu mesero desde
-                el botón superior.
+                {buffetOnly ? "Pide estos extras por separado con tu mesero." : "Explora el menú en vivo y llama a tu mesero cuando estés listo para ordenar."}
               </p>
             </header>
 
@@ -417,6 +423,7 @@ export function DinerTableView({
               categories={data.categories}
               dishes={data.dishes}
               currencyCode={data.currencyCode}
+              buffetOnly={buffetOnly}
             />
           </>
         )}
@@ -444,7 +451,7 @@ export function DinerTableView({
                 ) : account && account.canRequestBill ? (
                   <span className="az-badge success">
                     <Check aria-hidden="true" />
-                    Todo entregado
+                    {admission && account.totalUnits === 0 ? "Entrada registrada" : "Todo entregado"}
                   </span>
                 ) : account ? (
                   <span className="az-badge">
@@ -515,23 +522,32 @@ export function DinerTableView({
                 <div className="az-notice ok">
                   <Check className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
                   <span>
-                    Todos tus platillos ya fueron entregados. Cuando gustes, toca{" "}
+                    {admission && account?.totalUnits === 0 ? "La entrada de tu grupo está registrada." : "Todos tus platillos ya fueron entregados."}{" Cuando gustes, toca "}
                     <strong>Pedir la cuenta</strong> para avisar a tu mesero y a Caja.
                   </span>
                 </div>
               )}
             </div>
 
-            {account && account.items.length > 0 ? (
+            {account && (account.items.length > 0 || admission) ? (
               <section className="az-card" aria-label="Consumo de la mesa">
                 <div className="flex items-center justify-between gap-2">
-                  <h2 className="font-heading text-lg font-bold">Lo que pidieron</h2>
+                  <h2 className="font-heading text-lg font-bold">{admission ? "Consumo de la mesa" : "Lo que pidieron"}</h2>
                   <span className="text-xs text-muted-foreground">
                     Abierta {formatDateTime(account.openedAt)}
                   </span>
                 </div>
 
                 <div className="az-lines">
+                  {admission && (
+                    <div className="az-line">
+                      <div className="az-line-text">
+                        <strong>Entrada de buffet</strong>
+                        <span className="text-sm text-muted-foreground">{admission.adults} adultos · {admission.children} niños</span>
+                      </div>
+                      <span className="az-money">{formatMoney(admission.adults * admission.adultCents + admission.children * admission.childCents, data.currencyCode)}</span>
+                    </div>
+                  )}
                   {account.items.map((item) => {
                     const st = ITEM_STATUS_LABELS[item.status] ?? { label: item.status, cls: "" };
                     return (
@@ -629,7 +645,7 @@ export function DinerTableView({
                 {account.state === "awaiting_payment"
                   ? "Cuenta solicitada"
                   : account.canRequestBill
-                    ? "Todos tus platillos entregados · Puedes pedir la cuenta"
+                    ? admission && account.totalUnits === 0 ? "Entrada registrada · Puedes pedir la cuenta" : "Todos tus platillos entregados · Puedes pedir la cuenta"
                     : `${account.deliveredUnits} de ${account.totalUnits} platillos entregados`}
               </span>
             </div>

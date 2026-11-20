@@ -27,7 +27,7 @@ import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 
 import { flushSync } from "react-dom";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
-import { formatRoles, type StaffRole } from "@/lib/restaurant-roles";
+import { formatRoles, type ServiceMode, type StaffRole } from "@/lib/restaurant-roles";
 import { errorMessage, formatShortDate, initials, toRoman } from "@/lib/format";
 import { NotificationsBell } from "@/components/restaurant/notifications-bell";
 import { AdminModal, ConfirmModal } from "./admin-ui";
@@ -59,12 +59,14 @@ export function AdminShell({
   initialLocationName,
   initialStaffName,
   initialRoles,
+  initialServiceMode,
   children,
 }: {
   initialRestaurantName: string;
   initialLocationName: string;
   initialStaffName: string;
   initialRoles: readonly StaffRole[];
+  initialServiceMode: ServiceMode;
   children: ReactNode;
 }) {
   const pathname = usePathname();
@@ -89,6 +91,10 @@ export function AdminShell({
 
   const canQuery = isAuthenticated && !signingOut;
   const live = useQuery(api.restaurants.current, canQuery ? {} : "skip");
+  const serviceMode = live?.location.serviceMode ?? initialServiceMode;
+  const hasOpenReplenishments = useQuery(api.buffet.hasOpenReplenishments,
+    canQuery && serviceMode === "a_la_carte" ? {} : "skip");
+  const homeHref = serviceMode === "buffet" ? "/cuenta/buffet" : "/cuenta/mesas";
   const restaurantName = live?.restaurant.name ?? initialRestaurantName;
   const locationName = live?.location.name ?? initialLocationName;
   const staffName = live?.staff.displayName ?? initialStaffName;
@@ -121,12 +127,15 @@ export function AdminShell({
     };
   }, [accountMenuOpen]);
 
-  const activeItem =
-    ADMIN_NAV_ITEMS.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`)) ??
-    ADMIN_NAV_ITEMS[0];
+  const navItems = serviceMode !== "a_la_carte" ? ADMIN_NAV_ITEMS : ADMIN_NAV_ITEMS.flatMap((item) => {
+    if (item.id !== "buffet") return [item];
+    return hasOpenReplenishments ? [{ ...item, href: "/cuenta/buffet" }] : [];
+  });
+  const activeItem = navItems.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`) ||
+    (item.id === "buffet" && pathname === "/cuenta/buffet")) ?? navItems[0];
 
-  const primaryItems = ADMIN_NAV_ITEMS.filter((item) => MOBILE_PRIMARY_IDS.has(item.id));
-  const secondaryItems = ADMIN_NAV_ITEMS.filter((item) => !MOBILE_PRIMARY_IDS.has(item.id));
+  const primaryItems = navItems.filter((item) => MOBILE_PRIMARY_IDS.has(item.id));
+  const secondaryItems = navItems.filter((item) => !MOBILE_PRIMARY_IDS.has(item.id));
   const inMore = secondaryItems.some((item) => item.id === activeItem.id);
   const collageSrc = isOwner ? "/collage/osiris.webp" : "/collage/thot.webp";
 
@@ -243,12 +252,12 @@ export function AdminShell({
   return (
     <div className="az-shell">
       <aside className="az-side" aria-label="Navegación de administración">
-        <Link className="brand" href="/cuenta/mesas">
+        <Link className="brand" href={homeHref}>
           <span className="brand-mark" aria-hidden="true">Ø</span>
           <strong>Osiris</strong>
         </Link>
         <nav className="az-side-nav" aria-label="Pantallas de administración">
-          {ADMIN_NAV_ITEMS.map((item, idx) => {
+          {navItems.map((item, idx) => {
             const current = item.id === activeItem.id;
             return (
               <Link

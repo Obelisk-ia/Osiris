@@ -105,6 +105,7 @@ const chargeableAccountValidator = v.object({
   tipCents: v.number(),
   balanceCents: v.number(),
   itemCount: v.number(),
+  buffetGuestCount: v.number(),
   hasUndelivered: v.boolean(),
   paymentsCount: v.number(),
   reportedPayment: v.union(reportedPaymentView, v.null()),
@@ -267,7 +268,7 @@ export const snapshot = query({
     async function hydrateChargeable(acc: Doc<"accounts">) {
       const [display, gross, pay] = await Promise.all([
         accountDisplayLabel(ctx, acc),
-        loadAccountGrossCents(ctx, acc._id),
+        loadAccountGrossCents(ctx, acc),
         loadAccountPaymentTotals(ctx, acc._id),
       ]);
       const discountCents = acc.discountCents ?? 0;
@@ -294,6 +295,7 @@ export const snapshot = query({
         tipCents: pay.tipCents,
         balanceCents,
         itemCount: gross.activeUnits,
+        buffetGuestCount: acc.buffetAdmission ? acc.buffetAdmission.adults + acc.buffetAdmission.children : 0,
         hasUndelivered: gross.hasUndelivered,
         paymentsCount: pay.confirmedCount,
         reportedPayment: hydrateReportedPayment(acc, staffNames),
@@ -311,7 +313,7 @@ export const snapshot = query({
     });
 
     const openWithItems = (await Promise.all(openAccs.map(hydrateChargeable)))
-      .filter((a) => a.itemCount > 0 || a.totalCents > 0)
+      .filter((a) => a.itemCount > 0 || a.buffetGuestCount > 0 || a.totalCents > 0)
       .sort((a, b) => a.openedAt - b.openedAt);
 
     const closedAccounts = (
@@ -548,12 +550,12 @@ export const chargeAccount = mutation({
     }
 
     const [{ activeItemCount }, payTotals, activeShift] = await Promise.all([
-      loadAccountGrossCents(ctx, account._id),
+      loadAccountGrossCents(ctx, account),
       loadAccountPaymentTotals(ctx, account._id),
       findOpenShift(ctx, staff.locationId),
     ]);
 
-    if (activeItemCount === 0) {
+    if (activeItemCount === 0 && !account.buffetAdmission) {
       throw new ConvexError("Esta cuenta no tiene productos para cobrar.");
     }
 
@@ -567,7 +569,7 @@ export const chargeAccount = mutation({
 
     // 100% courtesy account (total === 0 with discount applied) can close without payment lines.
     if (balanceCents === 0) {
-      if ((account.discountCents ?? 0) > 0 && tipCents === 0) {
+      if (account.totalCents === 0 && ((account.discountCents ?? 0) > 0 || account.buffetAdmission) && tipCents === 0) {
         await closeAccountAndFreeTable(ctx, account, staff, now);
         return {
           closed: true,
@@ -703,7 +705,7 @@ export const applyDiscount = mutation({
     }
 
     const [{ grossCents }, payTotals] = await Promise.all([
-      loadAccountGrossCents(ctx, account._id),
+      loadAccountGrossCents(ctx, account),
       loadAccountPaymentTotals(ctx, account._id),
     ]);
 

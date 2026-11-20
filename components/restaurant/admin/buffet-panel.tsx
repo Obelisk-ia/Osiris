@@ -13,6 +13,7 @@ import { AdminModal, AdminPageHead, ConfirmModal, EmptyState, ToastBanner, useTo
 type Snapshot = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.buffet.snapshot>>>;
 type BuffetMenu = Snapshot["menus"][number];
 type DishOption = Snapshot["availableDishes"][number];
+type DishSettings = { destination: string; portionsPerTray: string };
 
 export function BuffetPanel({ preloaded }: { preloaded: Preloaded<typeof api.buffet.snapshot> }) {
   const data = usePreloadedQuery(preloaded);
@@ -49,12 +50,17 @@ export function BuffetPanel({ preloaded }: { preloaded: Preloaded<typeof api.buf
         restaurantName={data.restaurantName}
         locationName={data.locationName}
         title="Menús de buffet"
-        subtitle="Arma la selección de platillos del buffet por fecha. Cuando se integre cocina y salón, los lotes y comensales usarán estos menús."
+        subtitle="Configura el menú, la estación de servicio y las porciones por bandeja."
         actions={
-          <Button className="site-button" onClick={() => setModal({ open: true })}>
-            <Plus className="size-4" aria-hidden="true" />
-            Nuevo menú de buffet
-          </Button>
+          <>
+            <Button className="site-button" onClick={() => setModal({ open: true })}>
+              <Plus className="size-4" aria-hidden="true" />
+              Nuevo menú de buffet
+            </Button>
+            <Link href="/cuenta/buffet" className="inline-flex min-h-10 items-center px-2 text-sm font-semibold underline underline-offset-4">
+              Abrir servicio de buffet
+            </Link>
+          </>
         }
       />
 
@@ -164,6 +170,7 @@ export function BuffetPanel({ preloaded }: { preloaded: Preloaded<typeof api.buf
           menu={modal.menu}
           availableDishes={data.availableDishes}
           currencyCode={data.currencyCode}
+          timeZone={data.timeZone}
           onClose={() => setModal(null)}
           onSave={async (payload) => {
             if (modal.menu) {
@@ -199,25 +206,33 @@ function BuffetMenuModal({
   menu,
   availableDishes,
   currencyCode,
+  timeZone,
   onClose,
   onSave,
 }: {
   menu?: BuffetMenu;
   availableDishes: DishOption[];
   currencyCode: string;
+  timeZone: string;
   onClose: () => void;
   onSave: (payload: {
     name: string;
     menuDate: string;
     isActive: boolean;
     dishIds: Id<"dishes">[];
+    dishSettings: { dishId: Id<"dishes">; destination: string; portionsPerTray: number }[];
   }) => Promise<void>;
 }) {
   const [name, setName] = useState(menu?.name ?? "");
-  const [menuDate, setMenuDate] = useState(menu?.menuDate ?? todayIsoDate());
+  const [menuDate, setMenuDate] = useState(() => menu?.menuDate ?? todayIsoDate(timeZone));
   const [isActive, setIsActive] = useState(menu?.isActive ?? true);
   const [selectedIds, setSelectedIds] = useState<Id<"dishes">[]>(() =>
     menu ? menu.dishes.map((d) => d.dishId) : [],
+  );
+  const [settings, setSettings] = useState<Partial<Record<Id<"dishes">, DishSettings>>>(() =>
+    Object.fromEntries((menu?.dishes ?? []).map((dish) => [dish.dishId, {
+      destination: dish.destination, portionsPerTray: String(dish.portionsPerTray),
+    }])),
   );
   const [dishSearch, setDishSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -236,6 +251,12 @@ function BuffetMenuModal({
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
   }
 
+  function editDish(id: Id<"dishes">, field: keyof DishSettings, value: string) {
+    setSettings((prev) => ({ ...prev, [id]: {
+      ...{ destination: "Línea de buffet", portionsPerTray: "1" }, ...prev[id], [field]: value,
+    } }));
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
@@ -243,7 +264,11 @@ function BuffetMenuModal({
     if (!menuDate) return setError("Elige la fecha del buffet.");
     setPending(true);
     try {
-      await onSave({ name: name.trim(), menuDate, isActive, dishIds: selectedIds });
+      const dishSettings = selectedIds.flatMap((dishId) => {
+        const option = settings[dishId];
+        return option ? [{ dishId, destination: option.destination, portionsPerTray: Number(option.portionsPerTray) }] : [];
+      });
+      await onSave({ name: name.trim(), menuDate, isActive, dishIds: selectedIds, dishSettings });
     } catch (cause) {
       setError(errorMessage(cause, "No pudimos guardar el menú de buffet."));
     } finally {
@@ -324,26 +349,41 @@ function BuffetMenuModal({
               </div>
               <div className="grid gap-1 max-h-60 overflow-y-auto pr-1">
                 {visibleDishes.map((dish) => (
-                  <label
-                    key={dish._id}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-transparent px-2.5 py-2 hover:bg-black/5 cursor-pointer"
-                  >
-                    <span className="flex items-center gap-2.5 min-w-0">
-                      <input
-                        type="checkbox"
-                        className="size-4 accent-[#15140f]"
-                        checked={selectedSet.has(dish._id)}
-                        onChange={() => toggleDish(dish._id)}
-                      />
-                      <span className="truncate text-sm font-medium">{dish.name}</span>
-                      {dish.categoryName && (
-                        <span className="text-xs text-muted-foreground">· {dish.categoryName}</span>
-                      )}
-                    </span>
-                    <span className="az-money text-xs text-muted-foreground">
-                      {formatMoney(dish.priceCents, currencyCode)}
-                    </span>
-                  </label>
+                  <div key={dish._id}>
+                    <label className="flex items-center justify-between gap-3 rounded-lg px-2.5 py-2 hover:bg-black/5 cursor-pointer">
+                      <span className="flex items-center gap-2.5 min-w-0">
+                        <input
+                          type="checkbox"
+                          className="size-4 accent-foreground"
+                          checked={selectedSet.has(dish._id)}
+                          onChange={() => toggleDish(dish._id)}
+                        />
+                        <span className="truncate text-sm font-medium">{dish.name}</span>
+                        {dish.categoryName && (
+                          <span className="text-xs text-muted-foreground">· {dish.categoryName}</span>
+                        )}
+                      </span>
+                      <span className="az-money text-xs text-muted-foreground">
+                        {formatMoney(dish.priceCents, currencyCode)}
+                      </span>
+                    </label>
+                    {selectedSet.has(dish._id) && (
+                      <div className="az-form-grid px-2.5 pb-3">
+                        <div className="az-field">
+                          <label htmlFor={`buffet-destination-${dish._id}`}>Estación del buffet</label>
+                          <input id={`buffet-destination-${dish._id}`} maxLength={60}
+                            value={settings[dish._id]?.destination ?? "Línea de buffet"}
+                            onChange={(e) => editDish(dish._id, "destination", e.target.value)} required />
+                        </div>
+                        <div className="az-field">
+                          <label htmlFor={`buffet-portions-${dish._id}`}>Porciones por bandeja</label>
+                          <input id={`buffet-portions-${dish._id}`} type="number" min={1} step={1}
+                            value={settings[dish._id]?.portionsPerTray ?? "1"}
+                            onChange={(e) => editDish(dish._id, "portionsPerTray", e.target.value)} required />
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             </>

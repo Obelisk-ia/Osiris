@@ -5,6 +5,57 @@ import { authenticatedCaller, createRestaurant, setupRestaurantTest } from "../t
 import { api } from "./_generated/api";
 
 describe("waiter tables, shared menu ordering, and owner floor sync", () => {
+  it("uses only enabled stations and sells only approved extras in buffet mode", async () => {
+    const t = setupRestaurantTest();
+    const { owner, code, registration } = await createRestaurant(t);
+    const waiter = await authenticatedCaller(t, "waiter-mode@example.com");
+    const bartender = await authenticatedCaller(t, "bartender-mode@example.com");
+    await waiter.mutation(api.restaurants.completeRegistration, {
+      registration: { kind: "staff", displayName: "Javier", code, roles: ["waiter"] },
+    });
+    await bartender.mutation(api.restaurants.completeRegistration, {
+      registration: { kind: "staff", displayName: "Diego", code, roles: ["bartender"] },
+    });
+    const sectionId = await owner.mutation(api.floor.createSection, {
+      name: "Salón", canvas: { x: 1, y: 1, width: 60, height: 30 },
+    });
+    const tableId = await owner.mutation(api.floor.createTable, { sectionId, tableNumber: "Mesa 1", x: 30, y: 50 });
+    const props = { priceCents: 10000, isPublished: true, isAvailable: true, modifierGroupIds: [], recipe: [] };
+    const dishId = await owner.mutation(api.menu.createDish, { ...props, name: "Pollo asado", areas: ["kitchen"] });
+    const extraId = await owner.mutation(api.menu.createDish, {
+      ...props, name: "Limonada", areas: ["cocktails"], buffetExtra: true,
+    });
+    const order = (id: typeof dishId) => waiter.mutation(api.waiter.submitOrder, {
+      tableId, items: [{ dishId: id, quantity: 1, modifierOptionIds: [] }],
+    });
+    const first = await order(extraId);
+    await owner.mutation(api.menu.setPreparationAreaEnabled, { area: "cocktails", enabled: false });
+    const workspace = () => waiter.query(api.waiter.orderWorkspace, { tableId });
+    const qrCatalog = () => t.query(api.diner.publicMenu, { locationId: registration.location._id });
+    expect((await workspace()).dishes.map((dish) => dish._id)).toEqual([dishId]);
+    expect(await qrCatalog()).toMatchObject({ dishes: [{ _id: dishId }] });
+    await expect(order(extraId)).rejects.toThrow(/área apagada: Coctelería/);
+
+    const board = await bartender.query(api.kitchen.snapshot);
+    expect(board.allowedAreas.map((area) => area.area)).toEqual(["cocktails"]);
+    expect((await owner.query(api.kitchen.snapshot)).tickets).toMatchObject([{ orderId: first.orderId }]);
+    const { stationId } = board.tickets[0];
+    await bartender.mutation(api.kitchen.startTicket, { orderId: first.orderId, stationId });
+    await bartender.mutation(api.kitchen.markTicketReady, { orderId: first.orderId, stationId });
+    await waiter.mutation(api.waiter.deliverReadyItems, { accountId: first.accountId });
+    expect((await bartender.query(api.kitchen.snapshot)).allowedAreas).toEqual([]);
+
+    await owner.mutation(api.menu.setPreparationAreaEnabled, { area: "cocktails", enabled: true });
+    await owner.mutation(api.admin.updateFeatures, { serviceMode: "buffet" });
+    expect(await workspace()).toMatchObject({ serviceMode: "buffet", dishes: [{ _id: extraId }] });
+    expect(await qrCatalog()).toMatchObject({ serviceMode: "buffet", dishes: [{ _id: extraId }] });
+    await expect(order(dishId)).rejects.toThrow(/marcado como extra/);
+    await expect(order(extraId)).resolves.toMatchObject({ stationNames: ["Coctelería"] });
+
+    await owner.mutation(api.admin.updateFeatures, { serviceMode: "a_la_carte" });
+    expect((await workspace()).dishes.map((dish) => dish._id)).toEqual(expect.arrayContaining([dishId, extraId]));
+  });
+
   it("shows waiter their assigned tables plus unassigned tables, hiding other waiters' sections", async () => {
     const t = setupRestaurantTest();
     const { owner, code } = await createRestaurant(t);

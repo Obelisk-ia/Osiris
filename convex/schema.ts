@@ -1,9 +1,9 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import {
-  accountState, canvas, cashMovementKind, discountKind, inventoryKind, notificationKind, orderStatus,
+  accountState, buffetAdmission, buffetPrices, canvas, cashMovementKind, discountKind, inventoryKind, notificationKind, orderStatus,
   paymentMethod, paymentStatus, preparationArea, preparationStatus, reportedPayment, staffRole, stationRole,
-  submissionState, tableShape, tableStatus,
+  serviceMode, submissionState, tableShape, tableStatus,
 } from "./model/validators";
 
 const organization = { organizationId: v.id("organizations") };
@@ -20,7 +20,9 @@ export default defineSchema({
     ...organization, name: v.string(), address: v.optional(v.string()), timeZone: v.string(),
     guestOrderMode: v.union(v.literal("confirmation"), v.literal("direct")),
     maxPendingGuestOrders: v.number(), restrictWaitersToAssignedTables: v.boolean(),
-    serviceMode: v.union(v.literal("a_la_carte"), v.literal("buffet"), v.literal("mixed")),
+    serviceMode,
+    buffetTableService: v.optional(v.boolean()),
+    buffetPrices: v.optional(buffetPrices),
     autoSoldOut: v.optional(v.boolean()),
     autoLateOrderEnabled: v.optional(v.boolean()),
     autoLateOrderMinutes: v.optional(v.number()),
@@ -45,7 +47,7 @@ export default defineSchema({
   }).index("by_organizationId_and_sortOrder", ["organizationId", "sortOrder"]),
   dishes: defineTable({
     ...organization, name: v.string(), description: v.optional(v.string()), priceCents: v.number(),
-    isAvailable: v.boolean(), isPublished: v.optional(v.boolean()),
+    isAvailable: v.boolean(), isPublished: v.optional(v.boolean()), buffetExtra: v.optional(v.boolean()),
     area: v.optional(v.union(v.literal("cocina"), v.literal("barra"))),
     areas: v.optional(v.array(preparationArea)),
     categoryId: v.optional(v.id("dishCategories")),
@@ -141,6 +143,7 @@ export default defineSchema({
     assignedStaffId: v.optional(v.id("staff")), openedByStaffId: v.id("staff"),
     kind: v.union(v.literal("dine_in"), v.literal("counter"), v.literal("takeaway"), v.literal("pickup")),
     state: accountState, folio: v.number(), version: v.number(), requestId: v.string(), totalCents: v.number(),
+    buffetAdmission: v.optional(buffetAdmission),
     customerName: v.optional(v.string()), customerPhone: v.optional(v.string()),
     phoneConsentAt: v.optional(v.number()), privacyNoticeVersion: v.optional(v.string()),
     promisedAt: v.optional(v.number()), billRequestedAt: v.optional(v.number()),
@@ -207,6 +210,7 @@ export default defineSchema({
     .index("by_locationId_and_isActive_and_menuDate", ["locationId", "isActive", "menuDate"]),
   buffetMenuDishes: defineTable({
     ...scope, buffetMenuId: v.id("buffetMenus"), dishId: v.id("dishes"), sortOrder: v.number(),
+    destination: v.optional(v.string()), portionsPerTray: v.optional(v.number()),
   }).index("by_buffetMenuId_and_dishId", ["buffetMenuId", "dishId"]),
   buffetDiners: defineTable({
     ...scope, diningTableId: v.id("diningTables"), accountId: v.id("accounts"),
@@ -224,7 +228,16 @@ export default defineSchema({
     ...scope, buffetMenuId: v.id("buffetMenus"), dishId: v.id("dishes"),
     stationId: v.id("preparationStations"), portions: v.number(), status: preparationStatus,
     inventoryConsumedAt: v.optional(v.number()), startedByStaffId: v.optional(v.id("staff")), updatedAt: v.number(),
-  }).index("by_locationId_and_status", ["locationId", "status"]),
+    replenishment: v.optional(v.object({
+      dishName: v.string(), destination: v.string(), destinationKey: v.string(),
+      area: preparationArea, isOpen: v.boolean(), requestedByStaffId: v.id("staff"),
+      readyAt: v.optional(v.number()), replenishedByStaffId: v.optional(v.id("staff")),
+    })),
+  }).index("by_locationId_and_status", ["locationId", "status"])
+    .index("by_locationId_and_replenishment_isOpen_and_updatedAt", ["locationId", "replenishment.isOpen", "updatedAt"])
+    .index("by_locationId_and_dishId_and_destinationKey_and_isOpen", [
+      "locationId", "dishId", "replenishment.destinationKey", "replenishment.isOpen",
+    ]),
 
   // QR access remains separate from staff/auth sessions; not publicly exposed yet.
   guestSessions: defineTable({

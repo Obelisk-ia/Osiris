@@ -2,7 +2,7 @@ import { ConvexError, v } from "convex/values";
 import schema from "./schema";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
-import { staffRole } from "./model/validators";
+import { buffetPrices, serviceMode, staffRole } from "./model/validators";
 
 const EDITORS = ["owner", "manager"] as const;
 
@@ -21,7 +21,10 @@ export const featuresSnapshot = query({
   returns: v.object({
     restaurantName: v.string(),
     locationName: v.string(),
-    serviceMode: v.union(v.literal("a_la_carte"), v.literal("buffet"), v.literal("mixed")),
+    currencyCode: v.string(),
+    serviceMode,
+    buffetTableService: v.boolean(),
+    buffetPrices: v.union(buffetPrices, v.null()),
     guestOrderMode: v.union(v.literal("confirmation"), v.literal("direct")),
     maxPendingGuestOrders: v.number(),
     restrictWaitersToAssignedTables: v.boolean(),
@@ -43,7 +46,10 @@ export const featuresSnapshot = query({
     return {
       restaurantName: restaurant?.name ?? "Tu restaurante",
       locationName: location.name,
+      currencyCode: restaurant?.currencyCode ?? "MXN",
       serviceMode: location.serviceMode,
+      buffetTableService: location.buffetTableService ?? true,
+      buffetPrices: location.buffetPrices ?? null,
       guestOrderMode: location.guestOrderMode,
       maxPendingGuestOrders: location.maxPendingGuestOrders,
       restrictWaitersToAssignedTables: location.restrictWaitersToAssignedTables,
@@ -60,7 +66,9 @@ export const featuresSnapshot = query({
 
 export const updateFeatures = mutation({
   args: {
-    serviceMode: v.optional(v.union(v.literal("a_la_carte"), v.literal("buffet"), v.literal("mixed"))),
+    serviceMode: v.optional(serviceMode),
+    buffetTableService: v.optional(v.boolean()),
+    buffetPrices: v.optional(buffetPrices),
     guestOrderMode: v.optional(v.union(v.literal("confirmation"), v.literal("direct"))),
     maxPendingGuestOrders: v.optional(v.number()),
     restrictWaitersToAssignedTables: v.optional(v.boolean()),
@@ -81,6 +89,16 @@ export const updateFeatures = mutation({
     }
     const patch: Record<string, unknown> = {};
     if (args.serviceMode !== undefined) patch.serviceMode = args.serviceMode;
+    if (args.buffetTableService !== undefined) patch.buffetTableService = args.buffetTableService;
+    if (args.buffetPrices) {
+      const adultCents = safeInteger(args.buffetPrices.adultCents, "Tarifa de adulto", 1);
+      const childCents = args.buffetPrices.childCents === null
+        ? null : safeInteger(args.buffetPrices.childCents, "Tarifa de niño");
+      if (adultCents > 1_000_000 || (childCents ?? 0) > 1_000_000) {
+        throw new ConvexError("La tarifa por persona excede el límite permitido.");
+      }
+      patch.buffetPrices = { adultCents, childCents };
+    }
     if (args.guestOrderMode !== undefined) patch.guestOrderMode = args.guestOrderMode;
     if (args.maxPendingGuestOrders !== undefined) {
       const limit = safeInteger(args.maxPendingGuestOrders, "Límite de pedidos QR", 1);

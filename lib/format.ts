@@ -96,12 +96,25 @@ export function formatIsoDateLabel(isoDate: string): string {
   });
 }
 
-export function todayIsoDate(): string {
-  const now = new Date();
+export function todayIsoDate(timeZone?: string, now = new Date()): string {
+  if (timeZone) {
+    const parts = new Intl.DateTimeFormat("en", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(now);
+    const datePart = (type: string) => parts.find((part) => part.type === type)?.value;
+    return `${datePart("year")}-${datePart("month")}-${datePart("day")}`;
+  }
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
+}
+
+export function formatElapsedMinutes(start: number, end: number) {
+  const mins = Math.max(0, Math.floor((end - start) / 60_000));
+  if (mins < 1) return { mins, label: "ahora" };
+  if (mins < 60) return { mins, label: `${mins} min` };
+  return { mins, label: `${Math.floor(mins / 60)} h ${mins % 60} min` };
 }
 
 export function toRoman(n: number): string {

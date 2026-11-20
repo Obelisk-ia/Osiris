@@ -220,6 +220,7 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
                             Oculto
                           </span>
                         )}
+                        {data.serviceMode !== "a_la_carte" && dish.buffetExtra && <span className="az-badge">Extra de buffet</span>}
                         {(!dish.isAvailable || dish.soldByIngredient) && (
                           <span className="az-badge danger">
                             <Ban aria-hidden="true" />
@@ -457,8 +458,8 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
       {tab === "areas" && (
         <div className="grid gap-4 max-w-[780px]">
           <p className="text-sm text-muted-foreground">
-            Activa solo las estaciones que utiliza tu restaurante. Al crear o editar un platillo podrás asignarlo a una o
-            varias áreas a la vez (por ejemplo, Cocina y Barra).
+            Activa las estaciones que utiliza la sucursal. Al apagar un área, sus productos salen de la carta de esta
+            sucursal. Las comandas pendientes pueden terminarse.
           </p>
           <ul className="az-rows">
             {PREPARATION_AREAS.map((area) => {
@@ -506,6 +507,7 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
           modifierGroups={data.modifierGroups}
           inventoryItems={data.inventoryItems}
           enabledAreas={data.enabledAreas}
+          showBuffetOptions={data.serviceMode !== "a_la_carte"}
           currencyCode={data.currencyCode}
           generateUploadUrl={generateUploadUrl}
           onClose={() => setDishModal(null)}
@@ -521,6 +523,7 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
                 categoryId: payload.categoryId,
                 areas: payload.areas,
                 isPublished: payload.isPublished,
+                buffetExtra: payload.buffetExtra,
                 isAvailable: payload.isAvailable,
                 photoId: payload.photoId,
                 modifierGroupIds: payload.modifierGroupIds,
@@ -603,6 +606,7 @@ function DishModal({
   modifierGroups,
   inventoryItems,
   enabledAreas,
+  showBuffetOptions,
   currencyCode,
   generateUploadUrl,
   onClose,
@@ -613,6 +617,7 @@ function DishModal({
   modifierGroups: ModifierGroup[];
   inventoryItems: InventoryPicker[];
   enabledAreas: PreparationArea[];
+  showBuffetOptions: boolean;
   currencyCode: string;
   generateUploadUrl: () => Promise<string>;
   onClose: () => void;
@@ -623,6 +628,7 @@ function DishModal({
     categoryId?: Id<"dishCategories">;
     areas: PreparationArea[];
     isPublished: boolean;
+    buffetExtra: boolean;
     isAvailable: boolean;
     photoId?: Id<"_storage">;
     removePhoto?: boolean;
@@ -638,6 +644,7 @@ function DishModal({
     dish?.areas.length ? [...dish.areas] : [enabledAreas[0] ?? "kitchen"],
   );
   const [isPublished, setIsPublished] = useState(dish?.isPublished ?? true);
+  const [buffetExtra, setBuffetExtra] = useState(dish?.buffetExtra ?? false);
   const [isAvailable, setIsAvailable] = useState(dish?.isAvailable ?? true);
   const [selectedMods, setSelectedMods] = useState<Set<Id<"modifierGroups">>>(
     () => new Set(dish?.modifierGroupIds ?? []),
@@ -735,6 +742,7 @@ function DishModal({
         categoryId: categoryId ? (categoryId as Id<"dishCategories">) : undefined,
         areas: selectedAreas,
         isPublished,
+        buffetExtra,
         isAvailable,
         photoId: uploadedPhotoId,
         removePhoto: removePhoto && !uploadedPhotoId ? true : undefined,
@@ -890,6 +898,12 @@ function DishModal({
             <input type="checkbox" checked={isAvailable} onChange={(e) => setIsAvailable(e.target.checked)} />
             <span>Disponible para pedir</span>
           </label>
+          {showBuffetOptions && (
+            <label className="az-check">
+              <input type="checkbox" checked={buffetExtra} onChange={(e) => setBuffetExtra(e.target.checked)} />
+              <span>Vender como extra en modo Solo buffet</span>
+            </label>
+          )}
         </div>
 
         {modifierGroups.length > 0 && (

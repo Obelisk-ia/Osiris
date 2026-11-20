@@ -1,10 +1,57 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import {
+  PREPARATION_AREAS,
   PREPARATION_AREA_META,
   ROLE_TO_AREA,
+  locationPreparationAreas,
   type PreparationArea,
 } from "../../lib/restaurant-roles";
+
+export function resolveDishAreas(dish: Doc<"dishes">): PreparationArea[] {
+  if (dish.areas && dish.areas.length > 0) {
+    const areas = new Set(dish.areas);
+    return PREPARATION_AREAS.filter((area) => areas.has(area));
+  }
+  return dish.area === "barra" ? ["bar"] : ["kitchen"];
+}
+
+export function dishOrderRestriction(dish: Doc<"dishes">, location: Doc<"locations"> | null) {
+  if (dish.isPublished === false) return "Uno de los platillos ya no está publicado.";
+  if (location?.serviceMode === "buffet" && !dish.buffetExtra) {
+    return `${dish.name} debe estar marcado como extra para agregarlo a una cuenta en modo Solo buffet.`;
+  }
+  const enabledAreas = locationPreparationAreas(location?.enabledPreparationAreas);
+  const inactiveArea = resolveDishAreas(dish).find((area) => !enabledAreas.includes(area));
+  if (inactiveArea) return `${dish.name} requiere un área apagada: ${PREPARATION_AREA_META[inactiveArea].name}.`;
+  return null;
+}
+
+export async function ensureStationForArea(
+  ctx: MutationCtx,
+  staff: Doc<"staff">,
+  area: PreparationArea,
+): Promise<Id<"preparationStations">> {
+  const { name, role } = PREPARATION_AREA_META[area];
+  const existing = await ctx.db
+    .query("preparationStations")
+    .withIndex("by_locationId_and_name", (q) => q.eq("locationId", staff.locationId).eq("name", name))
+    .unique();
+  if (existing) {
+    if (!existing.isActive || existing.role !== role || existing.area !== area) {
+      await ctx.db.patch("preparationStations", existing._id, { isActive: true, role, area });
+    }
+    return existing._id;
+  }
+  return await ctx.db.insert("preparationStations", {
+    organizationId: staff.organizationId,
+    locationId: staff.locationId,
+    name,
+    role,
+    area,
+    isActive: true,
+  });
+}
 
 export function resolveStationArea(station: Doc<"preparationStations">): PreparationArea {
   if (station.area) return station.area;

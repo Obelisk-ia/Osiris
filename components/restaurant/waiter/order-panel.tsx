@@ -42,6 +42,7 @@ import {
   ReopenAccountModal,
 } from "@/components/restaurant/cashier/charge-modal";
 import { ReportPaymentModal } from "@/components/restaurant/waiter/report-payment-modal";
+import { BuffetSeatForm } from "@/components/restaurant/buffet/buffet-seat-form";
 import { OrderProgressBar, PlatesProgressList } from "./waiter-tables-panel";
 
 type Workspace = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.waiter.orderWorkspace>>>;
@@ -235,8 +236,12 @@ export function OrderPanel({
   const draftCount = draft.reduce((sum, line) => sum + line.quantity, 0);
 
   const account = data.account;
+  const buffetOnly = data.serviceMode === "buffet";
+  const admission = account?.buffetAdmission;
+  const seating = buffetOnly && data.table && !account;
   const allItems = account?.items ?? [];
   const sentItems = allItems.filter((item) => item.status !== "cancelled");
+  const hasBillableItems = sentItems.length > 0 || Boolean(admission);
   const cancelledItems = allItems.filter((item) => item.status === "cancelled");
 
   const accountTotalCents = account?.totalCents ?? 0;
@@ -252,7 +257,7 @@ export function OrderPanel({
       : "Cuenta";
 
   async function handleConfirmOrder() {
-    if (draft.length === 0 || actionPending) return;
+    if (!data.canTakeOrder || draft.length === 0 || actionPending) return;
     setActionPending(true);
     try {
       const res = await submitOrder({
@@ -338,7 +343,7 @@ export function OrderPanel({
 
   function handleRequestBillClick() {
     if (!account || actionPending) return;
-    if (draft.length > 0) {
+    if (data.canTakeOrder && draft.length > 0) {
       showToast("Tienes una orden sin confirmar. Tómala o quítala antes de pedir la cuenta.", "err");
       return;
     }
@@ -350,7 +355,7 @@ export function OrderPanel({
   }
 
   function handleBackClick() {
-    if (draft.length > 0) {
+    if (data.canTakeOrder && draft.length > 0) {
       setLeaveDraftOpen(true);
       return;
     }
@@ -405,7 +410,7 @@ export function OrderPanel({
         {data.canTakeOrder && (
           <section
             className={`grid gap-4${mobileTab === "menu" ? "" : " az-pane-off"}`}
-            aria-label="Menú"
+            aria-label={data.serviceMode === "buffet" ? "Extras del buffet" : "Menú"}
           >
             <div className="az-search">
               <Search aria-hidden="true" />
@@ -494,10 +499,12 @@ export function OrderPanel({
             ) : (
               <EmptyState
                 icon={<Utensils className="size-7" aria-hidden="true" />}
-                title={data.dishes.length === 0 ? "El menú aún está vacío" : "Sin resultados"}
+                title={data.dishes.length > 0 ? "Sin resultados" : data.serviceMode === "buffet" ? "Sin extras para pedir" : "El menú aún está vacío"}
                 description={
                   data.dishes.length === 0
-                    ? "Cuando el dueño o gerente agregue platillos en Menú, aparecerán aquí para tomar órdenes."
+                    ? data.serviceMode === "buffet"
+                      ? "Los productos autorizados como extras en Menú aparecerán aquí."
+                      : "Cuando el dueño o gerente agregue platillos en Menú, aparecerán aquí para tomar órdenes."
                     : "Prueba con otro nombre o cambia de categoría."
                 }
               />
@@ -514,7 +521,7 @@ export function OrderPanel({
                     className="site-button az-coral-cta"
                     onClick={() => setConfirmSendOpen(true)}
                   >
-                    Tomar orden
+                    {buffetOnly ? "Enviar extras" : "Tomar orden"}
                   </Button>
                 </div>
               ) : (
@@ -557,7 +564,7 @@ export function OrderPanel({
                   <span className="az-badge">Comiendo</span>
                 )
               ) : (
-                <span className="az-badge">Nueva orden</span>
+                <span className="az-badge">{seating ? "Mesa libre" : "Nueva orden"}</span>
               )}
             </div>
             <p className="text-xs text-muted-foreground mt-1">
@@ -619,6 +626,8 @@ export function OrderPanel({
                         : `Cobrar · ${formatMoney(accountBalanceCents, data.currencyCode)}`}
                     </Button>
                   </>
+                ) : accountBalanceCents === 0 ? (
+                  <span>La cuenta está lista para que Caja la cierre.</span>
                 ) : account.reportedPayment ? (
                   <>
                     <span>
@@ -686,18 +695,48 @@ export function OrderPanel({
             </div>
           )}
 
-          {draft.length === 0 && sentItems.length === 0 && (
+          {seating && data.table && (
+            data.canManageAccount && data.tableServiceEnabled && data.buffetPrices ? (
+              <BuffetSeatForm table={data.table} prices={data.buffetPrices} currencyCode={data.currencyCode}
+                onSeated={(accountId) => router.replace(`/cuenta/mesero/cuenta/${accountId}`)} />
+            ) : (
+              <p role="status" className="text-sm text-muted-foreground">
+                {data.tableServiceEnabled
+                  ? "Pide a un gerente que configure las tarifas en Administración → Características."
+                  : "La sucursal usa asientos libres en el buffet."}
+              </p>
+            )
+          )}
+
+          {admission && (
+            <section className="grid gap-2" aria-label="Entrada del buffet">
+              <h2 className="font-bold">Entrada del buffet</h2>
+              <dl className="az-lines">
+                {admission.adults > 0 && <div className="az-line">
+                  <dt>{admission.adults} × Adulto</dt>
+                  <dd>{formatMoney(admission.adults * admission.adultCents, data.currencyCode)}</dd>
+                </div>}
+                {admission.children > 0 && <div className="az-line">
+                  <dt>{admission.children} × Niño</dt>
+                  <dd>{formatMoney(admission.children * admission.childCents, data.currencyCode)}</dd>
+                </div>}
+              </dl>
+            </section>
+          )}
+
+          {!seating && !hasBillableItems && draft.length === 0 && (
             <div className="az-empty !py-6">
               <Utensils className="size-6" aria-hidden="true" />
               <h3>Cuenta sin productos</h3>
               <p className="text-xs">
-                Elige del menú lo que pidan. La mesa cambiará a Ocupada en cuanto confirmes{" "}
-                <strong>Tomar orden</strong>.
+                {buffetOnly ? (data.canTakeOrder ? "Agrega los extras que pidan." : "Los extras habilitados por administración aparecerán aquí.") : (
+                  <>Elige del menú lo que pidan. La mesa cambiará a Ocupada en cuanto confirmes <strong>Tomar orden</strong>.</>
+                )}
               </p>
             </div>
           )}
 
-          {draft.length > 0 && (
+          {data.canTakeOrder && draft.length > 0 && (
             <div className="grid gap-2">
               <div className="az-section-kicker">Orden por tomar</div>
               <div className="az-lines">
@@ -777,7 +816,7 @@ export function OrderPanel({
                 onClick={() => setConfirmSendOpen(true)}
               >
                 <Send className="size-4" aria-hidden="true" />
-                Tomar orden ({draftCount})
+                {buffetOnly ? "Enviar extras" : "Tomar orden"} ({draftCount})
               </Button>
             </div>
           )}
@@ -1013,7 +1052,7 @@ export function OrderPanel({
             <div className="grid grid-cols-2 gap-2">
               {account &&
                 account.state === "open" &&
-                sentItems.length > 0 &&
+                hasBillableItems &&
                 data.canManageAccount && (
                   <Button
                     type="button"
@@ -1027,7 +1066,7 @@ export function OrderPanel({
                 )}
               {account &&
                 (account.state === "open" || account.state === "awaiting_payment") &&
-                sentItems.length > 0 &&
+                hasBillableItems &&
                 data.canCharge && (
                   <Button
                     type="button"
@@ -1041,6 +1080,7 @@ export function OrderPanel({
                 )}
               {account &&
                 account.state === "awaiting_payment" &&
+                account.balanceCents > 0 &&
                 !data.canCharge &&
                 data.canManageAccount && (
                   <Button
@@ -1075,14 +1115,14 @@ export function OrderPanel({
                 onClick={() => setMobileTab("menu")}
               >
                 <ArrowLeft className="size-4" aria-hidden="true" />
-                Volver al menú
+                {buffetOnly ? "Agregar extras" : "Volver al menú"}
               </Button>
             )}
           </div>
         </section>
       </div>
 
-      {pickingDish && (
+      {pickingDish && data.canTakeOrder && (
         <ProductOptionsModal
           dish={pickingDish}
           groups={pickingDish.modifierGroupIds
@@ -1171,7 +1211,7 @@ export function OrderPanel({
       {moreActionsOpen && account && (
         <AdminModal title="Más acciones" onClose={() => setMoreActionsOpen(false)}>
           <div className="grid gap-2">
-            {data.canCharge && sentItems.length > 0 && (
+            {data.canCharge && hasBillableItems && (
               <Button
                 type="button"
                 variant="outline"
@@ -1186,7 +1226,7 @@ export function OrderPanel({
                 {account.discountCents > 0 ? "Editar o quitar descuento" : "Aplicar descuento o cortesía"}
               </Button>
             )}
-            {account.state === "open" && sentItems.length > 0 && !data.canCharge && data.canManageAccount && (
+            {account.state === "open" && hasBillableItems && account.balanceCents > 0 && !data.canCharge && data.canManageAccount && (
               <Button
                 type="button"
                 variant="outline"
@@ -1250,10 +1290,10 @@ export function OrderPanel({
                 onClick={() => void handleReopenOrdering()}
               >
                 <Undo2 className="size-4" aria-hidden="true" />
-                Volver a tomar orden
+                Reabrir cuenta para cambios
               </Button>
             )}
-            {account.state === "open" && sentItems.length === 0 && data.canManageAccount && (
+            {account.state === "open" && sentItems.length === 0 && account.paidCents === 0 && data.canManageAccount && (
               <Button
                 type="button"
                 variant="destructive"
@@ -1264,7 +1304,7 @@ export function OrderPanel({
                 }}
               >
                 <Ban className="size-4" aria-hidden="true" />
-                Anular cuenta vacía
+                {admission ? "Anular registro de buffet" : "Anular cuenta vacía"}
               </Button>
             )}
           </div>
@@ -1402,6 +1442,7 @@ export function OrderPanel({
             discountCents: account.discountCents,
             paidCents: account.paidCents,
             balanceCents: account.balanceCents,
+            buffetGuestCount: admission ? admission.adults + admission.children : 0,
             reportedPayment: account.reportedPayment,
           }}
           currencyCode={data.currencyCode}
@@ -1445,7 +1486,8 @@ export function OrderPanel({
       {voidConfirmOpen && account && (
         <ConfirmModal
           title="Anular cuenta"
-          message={`La cuenta A-${String(account.folio).padStart(4, "0")} no tiene productos. Se anulará y la mesa quedará libre.`}
+          message={admission ? "Se anulará la entrada del grupo y la mesa quedará libre." :
+            `La cuenta A-${String(account.folio).padStart(4, "0")} no tiene productos. Se anulará y la mesa quedará libre.`}
           confirmLabel="Anular cuenta"
           danger
           pending={actionPending}

@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
-import { preloadQuery } from "convex/nextjs";
+import { preloadQuery, preloadedQueryResult } from "convex/nextjs";
+import { redirect } from "next/navigation";
 import { Suspense } from "react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { OrderPanel } from "@/components/restaurant/waiter/order-panel";
 import { requireServiceSession } from "@/lib/service-auth";
 
-export const metadata: Metadata = { title: "Tomar orden" };
+export const metadata: Metadata = { title: "Mesa" };
 
 async function TableOrderContent({ params }: { params: Promise<{ tableId: string }> }) {
   const { tableId } = await params;
@@ -16,6 +17,8 @@ async function TableOrderContent({ params }: { params: Promise<{ tableId: string
     { tableId: tableId as Id<"diningTables"> },
     options,
   );
+  const workspace = preloadedQueryResult(preloaded);
+  if (!workspace.tableServiceEnabled && !workspace.account) redirect("/cuenta/buffet");
   return <OrderPanel preloaded={preloaded} returnHref="/cuenta/mesas" />;
 }
 

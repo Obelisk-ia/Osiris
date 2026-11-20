@@ -11,12 +11,17 @@ async function ServiceShellGate({ children }: { children: ReactNode }) {
   const isWaiter = registration.staff.roles.includes("waiter");
   const isCashier = registration.staff.roles.includes("cashier");
   const Shell = isAdmin ? AdminShell : isCashier && !isWaiter ? CashierShell : WaiterShell;
+  const branchProps = {
+    initialServiceMode: registration.location.serviceMode,
+    initialBuffetTableService: registration.location.buffetTableService,
+  };
   return (
     <Shell
       initialRestaurantName={registration.restaurant.name}
       initialLocationName={registration.location.name}
       initialStaffName={registration.staff.displayName}
       initialRoles={registration.staff.roles as StaffRole[]}
+      {...branchProps}
     >
       {children}
     </Shell>
