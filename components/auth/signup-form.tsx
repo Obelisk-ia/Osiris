@@ -9,6 +9,7 @@ import { ArrowUpRight, LoaderCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useRef, useState, type FormEvent } from "react";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { authErrorMessage } from "@/lib/auth-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,8 +29,9 @@ export function SignUpForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [branchCount, setBranchCount] = useState(0);
   const [details, setDetails] = useState<RegistrationDetails>({
-    kind: "owner", displayName: "", restaurantName: "", serviceMode: "a_la_carte", code: "", roles: [],
+    kind: "owner", displayName: "", restaurantName: "", serviceMode: "a_la_carte", code: "", locationId: "", roles: [],
   });
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -38,6 +40,10 @@ export function SignUpForm() {
     setError(null);
     if (!details.displayName.trim() || (details.kind === "owner" && !details.restaurantName.trim())) {
       setError("Completa tu nombre y los datos del restaurante.");
+      return;
+    }
+    if (details.kind === "staff" && branchCount > 1 && !details.locationId) {
+      setError("Elige la sucursal o establecimiento donde trabajas.");
       return;
     }
     if (details.kind === "staff" && details.roles.length === 0) {
@@ -64,7 +70,13 @@ export function SignUpForm() {
       const result = await client.mutation(api.restaurants.completeRegistration, {
         registration: details.kind === "owner"
           ? { kind: "owner", displayName: details.displayName, restaurantName: details.restaurantName, serviceMode: details.serviceMode }
-          : { kind: "staff", displayName: details.displayName, code: details.code, roles: details.roles },
+          : {
+              kind: "staff",
+              displayName: details.displayName,
+              code: details.code,
+              roles: details.roles,
+              ...(details.locationId ? { locationId: details.locationId as Id<"locations"> } : {}),
+            },
       });
       if (!result.success) {
         setError(result.message);
@@ -99,7 +111,7 @@ export function SignUpForm() {
 
   return (
     <form className="auth-form" onSubmit={submit} aria-busy={pending}>
-      <RegistrationFields value={details} onChange={setDetails} disabled={pending} />
+      <RegistrationFields value={details} onChange={setDetails} disabled={pending} onBranchesChange={setBranchCount} />
       {token === null ? (
         <>
           <div className="auth-field">

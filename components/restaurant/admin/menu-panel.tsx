@@ -10,6 +10,7 @@ import {
   Eye,
   EyeOff,
   ImagePlus,
+  Info,
   Plus,
   Search,
   Trash2,
@@ -158,12 +159,25 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
           Áreas
           <span className="az-count">{data.enabledAreas.length}</span>
         </button>
-        <button type="button" className="az-tab" role="tab" aria-selected={tab === "apariencia"} onClick={() => setTab("apariencia")}>
-          Apariencia
-        </button>
+        {data.canEditMenu && (
+          <button type="button" className="az-tab" role="tab" aria-selected={tab === "apariencia"} onClick={() => setTab("apariencia")}>
+            Apariencia
+          </button>
+        )}
       </div>
 
-      {tab === "apariencia" && (
+      {!data.canEditMenu && (
+        <div className="az-notice">
+          <Info className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
+          <span>
+            El catálogo del menú es compartido entre sucursales. Puedes marcar platillos agotados y configurar áreas de
+            preparación para <strong>{data.locationName}</strong>; solo el dueño o un gerente autorizado puede editar
+            platillos, categorías o modificadores.
+          </span>
+        </div>
+      )}
+
+      {tab === "apariencia" && data.canEditMenu && (
         <MenuAppearancePanel restaurantName={data.restaurantName} background={data.menuBackground} />
       )}
 
@@ -194,10 +208,12 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
               ))}
               <option value="uncategorized">Sin categoría</option>
             </select>
-            <Button className="site-button" onClick={() => setDishModal({ open: true })}>
-              <Plus className="size-4" aria-hidden="true" />
-              Nuevo producto
-            </Button>
+            {data.canEditMenu && (
+              <Button className="site-button" onClick={() => setDishModal({ open: true })}>
+                <Plus className="size-4" aria-hidden="true" />
+                Nuevo producto
+              </Button>
+            )}
           </div>
 
           {filteredDishes.length > 0 ? (
@@ -270,22 +286,26 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
                       >
                         {dish.isAvailable ? "Agotado" : "Disponible"}
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="icon-sm"
-                        aria-label={`Editar ${dish.name}`}
-                        onClick={() => setDishModal({ open: true, dish })}
-                      >
-                        <Edit3 aria-hidden="true" />
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="icon-sm"
-                        aria-label={`Borrar ${dish.name}`}
-                        onClick={() => setDeleteTarget({ kind: "dish", dish })}
-                      >
-                        <Trash2 aria-hidden="true" />
-                      </Button>
+                      {data.canEditMenu && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={`Editar ${dish.name}`}
+                            onClick={() => setDishModal({ open: true, dish })}
+                          >
+                            <Edit3 aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={`Borrar ${dish.name}`}
+                            onClick={() => setDeleteTarget({ kind: "dish", dish })}
+                          >
+                            <Trash2 aria-hidden="true" />
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </li>
@@ -301,7 +321,7 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
                   : "Ningún platillo coincide con el filtro actual."
               }
               action={
-                data.dishes.length === 0 ? (
+                data.dishes.length === 0 && data.canEditMenu ? (
                   <Button className="site-button mt-2" onClick={() => setDishModal({ open: true })}>
                     <Plus className="size-4" aria-hidden="true" />
                     Agregar primer platillo
@@ -315,12 +335,14 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
 
       {tab === "categorias" && (
         <div className="grid gap-4">
-          <div className="az-toolbar">
-            <Button className="site-button" onClick={() => setCatModal({ open: true })}>
-              <Plus className="size-4" aria-hidden="true" />
-              Nueva categoría
-            </Button>
-          </div>
+          {data.canEditMenu && (
+            <div className="az-toolbar">
+              <Button className="site-button" onClick={() => setCatModal({ open: true })}>
+                <Plus className="size-4" aria-hidden="true" />
+                Nueva categoría
+              </Button>
+            </div>
+          )}
           {data.categories.length > 0 ? (
             <ul className="az-rows">
               {data.categories.map((cat, idx) => {
@@ -335,57 +357,59 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
                           {!cat.isActive ? " · Oculta" : ""}
                         </p>
                       </div>
-                      <div className="az-row-actions">
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          disabled={idx === 0}
-                          aria-label={`Subir ${cat.name}`}
-                          onClick={() => void moveCategory({ categoryId: cat._id, direction: "up" })}
-                        >
-                          <ArrowUp aria-hidden="true" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          disabled={idx === data.categories.length - 1}
-                          aria-label={`Bajar ${cat.name}`}
-                          onClick={() => void moveCategory({ categoryId: cat._id, direction: "down" })}
-                        >
-                          <ArrowDown aria-hidden="true" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          aria-label={`${cat.isActive ? "Ocultar" : "Mostrar"} ${cat.name}`}
-                          onClick={async () => {
-                            try {
-                              await toggleCategoryActive({ categoryId: cat._id });
-                              showToast(cat.isActive ? `${cat.name} oculta del menú` : `${cat.name} visible de nuevo`);
-                            } catch (cause) {
-                              showToast(errorMessage(cause), "err");
-                            }
-                          }}
-                        >
-                          {cat.isActive ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          aria-label={`Renombrar ${cat.name}`}
-                          onClick={() => setCatModal({ open: true, category: cat })}
-                        >
-                          <Edit3 aria-hidden="true" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          aria-label={`Borrar ${cat.name}`}
-                          onClick={() => setDeleteTarget({ kind: "category", category: cat })}
-                        >
-                          <Trash2 aria-hidden="true" />
-                        </Button>
-                      </div>
+                      {data.canEditMenu && (
+                        <div className="az-row-actions">
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            disabled={idx === 0}
+                            aria-label={`Subir ${cat.name}`}
+                            onClick={() => void moveCategory({ categoryId: cat._id, direction: "up" })}
+                          >
+                            <ArrowUp aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            disabled={idx === data.categories.length - 1}
+                            aria-label={`Bajar ${cat.name}`}
+                            onClick={() => void moveCategory({ categoryId: cat._id, direction: "down" })}
+                          >
+                            <ArrowDown aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={`${cat.isActive ? "Ocultar" : "Mostrar"} ${cat.name}`}
+                            onClick={async () => {
+                              try {
+                                await toggleCategoryActive({ categoryId: cat._id });
+                                showToast(cat.isActive ? `${cat.name} oculta del menú` : `${cat.name} visible de nuevo`);
+                              } catch (cause) {
+                                showToast(errorMessage(cause), "err");
+                              }
+                            }}
+                          >
+                            {cat.isActive ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={`Renombrar ${cat.name}`}
+                            onClick={() => setCatModal({ open: true, category: cat })}
+                          >
+                            <Edit3 aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={`Borrar ${cat.name}`}
+                            onClick={() => setDeleteTarget({ kind: "category", category: cat })}
+                          >
+                            <Trash2 aria-hidden="true" />
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   </li>
                 );
@@ -403,12 +427,14 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
 
       {tab === "modificadores" && (
         <div className="grid gap-4">
-          <div className="az-toolbar">
-            <Button className="site-button" onClick={() => setModModal({ open: true })}>
-              <Plus className="size-4" aria-hidden="true" />
-              Nuevo grupo
-            </Button>
-          </div>
+          {data.canEditMenu && (
+            <div className="az-toolbar">
+              <Button className="site-button" onClick={() => setModModal({ open: true })}>
+                <Plus className="size-4" aria-hidden="true" />
+                Nuevo grupo
+              </Button>
+            </div>
+          )}
           {data.modifierGroups.length > 0 ? (
             <ul className="az-rows">
               {data.modifierGroups.map((group) => {
@@ -431,24 +457,26 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
                             .join(", ")}
                         </p>
                       </div>
-                      <div className="az-row-actions">
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          aria-label={`Editar ${group.name}`}
-                          onClick={() => setModModal({ open: true, group })}
-                        >
-                          <Edit3 aria-hidden="true" />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="icon-sm"
-                          aria-label={`Borrar ${group.name}`}
-                          onClick={() => setDeleteTarget({ kind: "modifier", group })}
-                        >
-                          <Trash2 aria-hidden="true" />
-                        </Button>
-                      </div>
+                      {data.canEditMenu && (
+                        <div className="az-row-actions">
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={`Editar ${group.name}`}
+                            onClick={() => setModModal({ open: true, group })}
+                          >
+                            <Edit3 aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={`Borrar ${group.name}`}
+                            onClick={() => setDeleteTarget({ kind: "modifier", group })}
+                          >
+                            <Trash2 aria-hidden="true" />
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   </li>
                 );

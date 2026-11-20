@@ -1,7 +1,7 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import {
-  accountState, buffetAdmission, buffetPrices, canvas, cashMovementKind, discountKind, inventoryKind, notificationKind, orderStatus,
+  accountState, buffetAdmission, buffetPrices, canvas, cashMovementKind, discountKind, inventoryKind, managerPermission, notificationKind, orderStatus,
   menuBackgroundSetting, paymentMethod, paymentStatus, preparationArea, preparationStatus, reportedPayment, staffRole, stationRole,
   serviceMode, submissionState, tableShape, tableStatus,
 } from "./model/validators";
@@ -35,6 +35,7 @@ export default defineSchema({
   }).index("by_organizationId", ["organizationId"]),
   staff: defineTable({
     ...scope, userId: v.id("users"), displayName: v.string(), roles: v.array(staffRole), isActive: v.boolean(),
+    managerPermissions: v.optional(v.array(managerPermission)),
   }).index("by_userId", ["userId"])
     .index("by_organizationId_and_userId", ["organizationId", "userId"])
     .index("by_locationId_and_isActive", ["locationId", "isActive"]),
@@ -54,6 +55,10 @@ export default defineSchema({
     categoryId: v.optional(v.id("dishCategories")),
     photoId: v.optional(v.id("_storage")),
   }).index("by_organizationId", ["organizationId"]).index("by_categoryId", ["categoryId"]),
+  locationDishAvailability: defineTable({
+    ...scope, dishId: v.id("dishes"), isAvailable: v.boolean(), updatedAt: v.number(),
+  }).index("by_locationId", ["locationId"])
+    .index("by_locationId_and_dishId", ["locationId", "dishId"]),
   dishIngredients: defineTable({
     ...organization, dishId: v.id("dishes"), name: v.optional(v.string()), quantityText: v.optional(v.string()),
   }).index("by_dishId", ["dishId"]),

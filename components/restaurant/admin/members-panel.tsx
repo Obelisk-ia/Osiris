@@ -1,16 +1,19 @@
 "use client";
 
 import { useMutation, usePreloadedQuery, useQuery, type Preloaded } from "convex/react";
-import { Copy, Info, RefreshCw, Shield, Users } from "lucide-react";
+import { ArrowRightLeft, Copy, Info, RefreshCw, Shield, Users } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/convex/_generated/api";
-import type { Doc } from "@/convex/_generated/dataModel";
+import type { Doc, Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import {
   formatRoles,
   isRoleSelectionChecked,
+  managerPermissionLabels,
+  managerPermissionOptions,
   roleSelections,
   toggleRoleSelection,
+  type ManagerPermission,
   type OperationalRole,
   type StaffRole,
 } from "@/lib/restaurant-roles";
@@ -24,12 +27,14 @@ export function MembersPanel({ preloaded }: { preloaded: Preloaded<typeof api.ad
   const ownerCode = useQuery(api.restaurants.ownerCode, data.isOwner ? {} : "skip");
   const rotateCode = useMutation(api.restaurants.rotateCode);
   const updateMemberRoles = useMutation(api.admin.updateMemberRoles);
+  const transferMemberBranch = useMutation(api.admin.transferMemberBranch);
   const toggleMemberActive = useMutation(api.admin.toggleMemberActive);
   const { toast, showToast } = useToast();
 
   const [confirmRotate, setConfirmRotate] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
+  const [transferTarget, setTransferTarget] = useState<Member | null>(null);
   const [toggleTarget, setToggleTarget] = useState<Member | null>(null);
   const [togglePending, setTogglePending] = useState(false);
 
@@ -109,8 +114,10 @@ export function MembersPanel({ preloaded }: { preloaded: Preloaded<typeof api.ad
         <div className="az-notice">
           <Info className="size-4 shrink-0 mt-0.5" aria-hidden="true" />
           <span>
-            Estás viendo el directorio de tu equipo como gerente. Solo el <strong>dueño</strong> puede cambiar roles,
-            desactivar miembros o regenerar el código de invitación.
+            Estás viendo el directorio de tu equipo como gerente.{" "}
+            {data.canTransferStaff
+              ? "Tienes permiso del dueño para transferir personal a otra sucursal. Solo el dueño puede cambiar roles, desactivar miembros o regenerar el código."
+              : "Solo el dueño puede cambiar roles, transferir personal de sucursal, desactivar miembros o regenerar el código de invitación."}
           </span>
         </div>
       )}
@@ -137,21 +144,36 @@ export function MembersPanel({ preloaded }: { preloaded: Preloaded<typeof api.ad
                           {label}
                         </span>
                       ))}
+                      {(member.managerPermissions ?? []).map((perm) => (
+                        <span key={perm} className="az-badge accent">
+                          {managerPermissionLabels[perm]}
+                        </span>
+                      ))}
                     </div>
                   </div>
-                  {data.isOwner && !isSelf && (
+                  {!isSelf && (data.isOwner || (data.canTransferStaff && data.branches.length > 1 && !member.roles.includes("owner"))) && (
                     <div className="az-row-actions">
-                      <Button variant="outline" size="sm" onClick={() => setEditingMember(member)}>
-                        <Shield className="size-3.5" aria-hidden="true" />
-                        Roles
-                      </Button>
-                      <Button
-                        variant={member.isActive ? "destructive" : "outline"}
-                        size="sm"
-                        onClick={() => setToggleTarget(member)}
-                      >
-                        {member.isActive ? "Desactivar" : "Reactivar"}
-                      </Button>
+                      {data.canTransferStaff && data.branches.length > 1 && !member.roles.includes("owner") && (
+                        <Button variant="outline" size="sm" onClick={() => setTransferTarget(member)}>
+                          <ArrowRightLeft className="size-3.5" aria-hidden="true" />
+                          Sucursal
+                        </Button>
+                      )}
+                      {data.isOwner && (
+                        <>
+                          <Button variant="outline" size="sm" onClick={() => setEditingMember(member)}>
+                            <Shield className="size-3.5" aria-hidden="true" />
+                            Roles
+                          </Button>
+                          <Button
+                            variant={member.isActive ? "destructive" : "outline"}
+                            size="sm"
+                            onClick={() => setToggleTarget(member)}
+                          >
+                            {member.isActive ? "Desactivar" : "Reactivar"}
+                          </Button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -171,10 +193,25 @@ export function MembersPanel({ preloaded }: { preloaded: Preloaded<typeof api.ad
         <RolesModal
           member={editingMember}
           onClose={() => setEditingMember(null)}
-          onSave={async (roles) => {
-            await updateMemberRoles({ memberId: editingMember._id, roles });
+          onSave={async (roles, managerPermissions) => {
+            await updateMemberRoles({ memberId: editingMember._id, roles, managerPermissions });
             showToast(`Roles de ${editingMember.displayName} actualizados`);
             setEditingMember(null);
+          }}
+        />
+      )}
+
+      {transferTarget && (
+        <TransferBranchModal
+          member={transferTarget}
+          currentLocationId={data.currentLocationId}
+          branches={data.branches}
+          onClose={() => setTransferTarget(null)}
+          onTransfer={async (targetLocationId) => {
+            const target = data.branches.find((b) => b._id === targetLocationId);
+            await transferMemberBranch({ memberId: transferTarget._id, targetLocationId });
+            showToast(`${transferTarget.displayName} movido a ${target?.name ?? "otra sucursal"}`);
+            setTransferTarget(null);
           }}
         />
       )}
@@ -219,14 +256,23 @@ function RolesModal({
 }: {
   member: Member;
   onClose: () => void;
-  onSave: (roles: StaffRole[]) => Promise<void>;
+  onSave: (roles: StaffRole[], managerPermissions: ManagerPermission[]) => Promise<void>;
 }) {
   const [isManager, setIsManager] = useState(member.roles.includes("manager"));
+  const [managerPermissions, setManagerPermissions] = useState<ManagerPermission[]>(
+    () => (member.managerPermissions ?? []) as ManagerPermission[],
+  );
   const [opRoles, setOpRoles] = useState<OperationalRole[]>(
     () => member.roles.filter((r): r is OperationalRole => r !== "owner" && r !== "manager"),
   );
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  function togglePermission(perm: ManagerPermission, checked: boolean) {
+    setManagerPermissions((prev) =>
+      checked ? [...new Set([...prev, perm])] : prev.filter((p) => p !== perm),
+    );
+  }
 
   async function save() {
     setError(null);
@@ -237,7 +283,7 @@ function RolesModal({
     }
     setPending(true);
     try {
-      await onSave(next);
+      await onSave(next, isManager ? managerPermissions : []);
     } catch (cause) {
       setError(errorMessage(cause, "No pudimos actualizar los roles."));
     } finally {
@@ -262,8 +308,8 @@ function RolesModal({
     >
       <div className="grid gap-3">
         <p className="text-sm text-muted-foreground">
-          Combina los permisos que necesite. El rol de gerente da acceso al panel completo de administración (excepto
-          gestión de miembros).
+          Combina los permisos que necesite. El rol de gerente da acceso al panel de su sucursal; puedes otorgarle
+          permisos especiales abajo.
         </p>
 
         <label className="flex items-start gap-3 rounded-xl border border-border bg-card p-3 cursor-pointer">
@@ -276,10 +322,33 @@ function RolesModal({
           <span className="grid gap-0.5">
             <strong className="text-sm">Gerente</strong>
             <span className="text-xs text-muted-foreground">
-              Menú, inventario, plano de mesas, buffet, códigos QR y configuración.
+              Inventario local, disponibilidad del menú, plano de mesas, buffet, códigos QR y configuración de su
+              sucursal.
             </span>
           </span>
         </label>
+
+        {isManager && (
+          <div className="grid gap-2 rounded-xl border border-dashed border-border bg-muted/30 p-3">
+            <p className="text-xs font-semibold text-muted-foreground">
+              Permisos especiales del dueño para este gerente
+            </p>
+            {managerPermissionOptions.map((opt) => (
+              <label key={opt.value} className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="size-4 mt-0.5 accent-[#15140f]"
+                  checked={managerPermissions.includes(opt.value)}
+                  onChange={(e) => togglePermission(opt.value, e.target.checked)}
+                />
+                <span className="grid gap-0.5">
+                  <strong className="text-sm">{opt.label}</strong>
+                  <span className="text-xs text-muted-foreground">{opt.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
 
         {roleSelections.map((selection) => {
           const checked = isRoleSelectionChecked(opRoles, selection);
@@ -302,6 +371,80 @@ function RolesModal({
           );
         })}
 
+        {error && <p className="floor-error" role="alert">{error}</p>}
+      </div>
+    </AdminModal>
+  );
+}
+
+function TransferBranchModal({
+  member,
+  currentLocationId,
+  branches,
+  onClose,
+  onTransfer,
+}: {
+  member: Member;
+  currentLocationId: Id<"locations">;
+  branches: ReadonlyArray<{ _id: Id<"locations">; name: string }>;
+  onClose: () => void;
+  onTransfer: (targetLocationId: Id<"locations">) => Promise<void>;
+}) {
+  const options = branches.filter((branch) => branch._id !== currentLocationId);
+  const [targetId, setTargetId] = useState<string>(options[0]?._id ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  async function submit() {
+    if (!targetId) {
+      setError("Elige la sucursal de destino.");
+      return;
+    }
+    setError(null);
+    setPending(true);
+    try {
+      await onTransfer(targetId as Id<"locations">);
+    } catch (cause) {
+      setError(errorMessage(cause, "No pudimos cambiar de sucursal."));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <AdminModal
+      title={`Cambiar sucursal de ${member.displayName}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="button" className="site-button" disabled={pending || !targetId} onClick={() => void submit()}>
+            {pending ? "Moviendo…" : "Confirmar cambio"}
+          </Button>
+        </>
+      }
+    >
+      <div className="grid gap-4">
+        <p className="text-sm text-muted-foreground">
+          Al mover a {member.displayName} a otra sucursal se liberarán las mesas o secciones que tenga asignadas aquí y
+          solo verá la operación de la nueva sucursal.
+        </p>
+        <div className="az-field">
+          <label htmlFor="transfer-branch-select">Sucursal de destino</label>
+          <select
+            id="transfer-branch-select"
+            value={targetId}
+            onChange={(event) => setTargetId(event.target.value)}
+          >
+            {options.map((branch) => (
+              <option key={branch._id} value={branch._id}>
+                {branch.name}
+              </option>
+            ))}
+          </select>
+        </div>
         {error && <p className="floor-error" role="alert">{error}</p>}
       </div>
     </AdminModal>

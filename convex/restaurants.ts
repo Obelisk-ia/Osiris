@@ -9,6 +9,7 @@ import schema from "./schema";
 const limiter = new RateLimiter(components.rateLimiter, {
   restaurantJoin: { kind: "token bucket", rate: 5, period: MINUTE, capacity: 5 },
   restaurantJoinIp: { kind: "token bucket", rate: 20, period: MINUTE, capacity: 20 },
+  codeLookupIp: { kind: "token bucket", rate: 20, period: MINUTE, capacity: 20 },
 });
 
 function normalizeCode(code: string) {
@@ -31,12 +32,77 @@ async function newCode(ctx: MutationCtx) {
 
 const onboarding = v.union(
   v.object({ kind: v.literal("owner"), displayName: v.string(), restaurantName: v.string(), serviceMode: v.optional(serviceMode) }),
-  v.object({ kind: v.literal("staff"), displayName: v.string(), code: v.string(), roles: v.array(operationalRole) }),
+  v.object({
+    kind: v.literal("staff"),
+    displayName: v.string(),
+    code: v.string(),
+    roles: v.array(operationalRole),
+    locationId: v.optional(v.id("locations")),
+  }),
 );
 const registrationResult = v.union(
   v.object({ success: v.literal(true), staffId: v.id("staff") }),
   v.object({ success: v.literal(false), message: v.string() }),
 );
+
+export const lookupCodeBranches = mutation({
+  args: { code: v.string() },
+  returns: v.union(
+    v.object({
+      found: v.literal(true),
+      restaurantName: v.string(),
+      branches: v.array(
+        v.object({
+          _id: v.id("locations"),
+          name: v.string(),
+          address: v.union(v.string(), v.null()),
+        }),
+      ),
+    }),
+    v.object({ found: v.literal(false), message: v.string() }),
+  ),
+  handler: async (ctx, args) => {
+    const { ip } = await ctx.meta.getRequestMetadata();
+    if (ip === null) {
+      return { found: false as const, message: "No pudimos verificar la solicitud. Vuelve a intentar." };
+    }
+    const perIp = await limiter.limit(ctx, "codeLookupIp", { key: ip });
+    if (!perIp.ok) {
+      return { found: false as const, message: "Demasiados intentos. Espera un minuto antes de probar otro código." };
+    }
+    const invalid = {
+      found: false as const,
+      message: "El código del restaurante no es válido. Confírmalo con tu dueño o gerente.",
+    };
+    if (args.code.length > 100) return invalid;
+    const code = normalizeCode(args.code);
+    if (!/^OSR[A-HJ-NP-Z2-9]{12}$/.test(code)) return invalid;
+    const invitation = await ctx.db
+      .query("organizationCodes")
+      .withIndex("by_code", (q) => q.eq("code", code))
+      .unique();
+    if (!invitation) return invalid;
+    const [restaurant, branches] = await Promise.all([
+      ctx.db.get("organizations", invitation.organizationId),
+      ctx.db
+        .query("locations")
+        .withIndex("by_organizationId", (q) => q.eq("organizationId", invitation.organizationId))
+        .take(50),
+    ]);
+    if (!restaurant || branches.length === 0) {
+      return { found: false as const, message: "Este código ya no está disponible. Pide un código nuevo." };
+    }
+    return {
+      found: true as const,
+      restaurantName: restaurant.name,
+      branches: branches.map((branch) => ({
+        _id: branch._id,
+        name: branch.name,
+        address: branch.address ?? null,
+      })),
+    };
+  },
+});
 
 export const completeRegistration = mutation({
   args: { registration: onboarding },
@@ -83,9 +149,15 @@ export const completeRegistration = mutation({
     if (!/^OSR[A-HJ-NP-Z2-9]{12}$/.test(code)) return invalidCode;
     const invitation = await ctx.db.query("organizationCodes").withIndex("by_code", (q) => q.eq("code", code)).unique();
     if (!invitation) return invalidCode;
-    const location = await ctx.db.get("locations", invitation.locationId);
+    const targetLocationId = registration.locationId ?? invitation.locationId;
+    const location = await ctx.db.get("locations", targetLocationId);
     if (!location || location.organizationId !== invitation.organizationId) {
-      return { success: false as const, message: "Este código ya no está disponible. Pide un código nuevo." };
+      return {
+        success: false as const,
+        message: registration.locationId
+          ? "La sucursal seleccionada no pertenece a este restaurante."
+          : "Este código ya no está disponible. Pide un código nuevo.",
+      };
     }
     const staffId = await ctx.db.insert("staff", {
       organizationId: invitation.organizationId, locationId: location._id, userId: user._id,

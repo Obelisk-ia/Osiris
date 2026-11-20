@@ -2,6 +2,7 @@ import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
+import { loadLocationDishAvailability, resolveDishAvailability } from "./model/dishes";
 import {
   closeAccountAndFreeTable,
   findOpenShift,
@@ -970,6 +971,7 @@ export const orderWorkspace = query({
       .sort((a, b) => a.displayName.localeCompare(b.displayName, "es-MX"));
 
     const autoSoldOut = location?.autoSoldOut ?? true;
+    const availabilityMap = await loadLocationDishAvailability(ctx, staff.locationId);
     const balanceMap = new Map(balances.map((b) => [b.inventoryItemId, b.quantityMicros] as const));
     const activeCategories = categories.filter((c) => c.isActive);
     const activeCategoryIds = new Set(activeCategories.map((c) => c._id));
@@ -1002,7 +1004,7 @@ export const orderWorkspace = query({
             categoryId: dish.categoryId ?? null,
             areas: resolveDishAreas(dish),
             photoUrl,
-            soldOut: !dish.isAvailable || soldByIngredient,
+            soldOut: !resolveDishAvailability(dish, availabilityMap) || soldByIngredient,
             modifierGroupIds: modLinks
               .sort((a, b) => a.sortOrder - b.sortOrder)
               .map((l) => l.modifierGroupId),
@@ -1397,12 +1399,15 @@ export const submitOrder = mutation({
     }
 
     // Validate all dishes & modifiers before writing anything.
-    const balances = autoSoldOut
-      ? await ctx.db
-          .query("inventoryBalances")
-          .withIndex("by_locationId_and_inventoryItemId", (q) => q.eq("locationId", staff.locationId))
-          .take(200)
-      : [];
+    const [balances, availabilityMap] = await Promise.all([
+      autoSoldOut
+        ? ctx.db
+            .query("inventoryBalances")
+            .withIndex("by_locationId_and_inventoryItemId", (q) => q.eq("locationId", staff.locationId))
+            .take(200)
+        : Promise.resolve([]),
+      loadLocationDishAvailability(ctx, staff.locationId),
+    ]);
     const balanceMap = new Map(balances.map((b) => [b.inventoryItemId, b.quantityMicros] as const));
 
     const preparedLines: Array<{
@@ -1426,7 +1431,7 @@ export const submitOrder = mutation({
       }
       const restriction = dishOrderRestriction(dish, location);
       if (restriction) throw new ConvexError(restriction);
-      if (!dish.isAvailable) {
+      if (!resolveDishAvailability(dish, availabilityMap)) {
         throw new ConvexError(`${dish.name} está agotado y no se puede ordenar.`);
       }
       if (autoSoldOut) {

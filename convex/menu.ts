@@ -3,16 +3,34 @@ import schema from "./schema";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
+import {
+  loadLocationDishAvailability,
+  resolveDishAvailability,
+  setLocationDishAvailability,
+} from "./model/dishes";
 import { resolveDishAreas } from "./model/orders";
 import { menuBackgroundView, preparationArea, serviceMode } from "./model/validators";
 import { MAX_MENU_BACKGROUND_BYTES, type MenuBackground } from "../lib/menu-appearance";
-import { locationPreparationAreas, PREPARATION_AREAS, type PreparationArea } from "../lib/restaurant-roles";
+import {
+  canEditSharedMenu,
+  locationPreparationAreas,
+  PREPARATION_AREAS,
+  type PreparationArea,
+} from "../lib/restaurant-roles";
 
 const EDITORS = ["owner", "manager"] as const;
 const unitValidator = v.union(v.literal("g"), v.literal("ml"), v.literal("each"));
 
 async function editor(ctx: MutationCtx | QueryCtx) {
   return await requireStaff(ctx, undefined, undefined, EDITORS);
+}
+
+async function menuEditor(ctx: MutationCtx | QueryCtx) {
+  const staff = await editor(ctx);
+  if (!canEditSharedMenu(staff)) {
+    throw new ConvexError("Solo el dueño o un gerente autorizado puede editar el menú compartido.");
+  }
+  return staff;
 }
 
 export async function loadMenuBackground(ctx: QueryCtx, restaurant: Doc<"organizations"> | null): Promise<MenuBackground> {
@@ -47,7 +65,7 @@ export const updateMenuBackground = mutation({
   ) },
   returns: v.null(),
   handler: async (ctx, { background }) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const restaurant = await ctx.db.get("organizations", staff.organizationId);
     if (!restaurant) throw new ConvexError("No encontramos tu restaurante.");
 
@@ -136,6 +154,7 @@ export const snapshot = query({
     locationName: v.string(),
     currencyCode: v.string(),
     serviceMode,
+    canEditMenu: v.boolean(),
     menuBackground: menuBackgroundView,
     autoSoldOut: v.boolean(),
     enabledAreas: v.array(preparationArea),
@@ -146,7 +165,7 @@ export const snapshot = query({
   }),
   handler: async (ctx) => {
     const staff = await editor(ctx);
-    const [restaurant, location, categories, dishes, groups, items, balances] = await Promise.all([
+    const [restaurant, location, categories, dishes, groups, items, balances, availabilityMap] = await Promise.all([
       ctx.db.get("organizations", staff.organizationId),
       ctx.db.get("locations", staff.locationId),
       ctx.db
@@ -169,6 +188,7 @@ export const snapshot = query({
         .query("inventoryBalances")
         .withIndex("by_locationId_and_inventoryItemId", (q) => q.eq("locationId", staff.locationId))
         .take(200),
+      loadLocationDishAvailability(ctx, staff.locationId),
     ]);
 
     const autoSoldOut = location?.autoSoldOut ?? true;
@@ -213,7 +233,7 @@ export const snapshot = query({
           name: dish.name,
           description: dish.description ?? "",
           priceCents: dish.priceCents,
-          isAvailable: dish.isAvailable,
+          isAvailable: resolveDishAvailability(dish, availabilityMap),
           isPublished: dish.isPublished ?? true,
           areas: resolveDishAreas(dish),
           buffetExtra: dish.buffetExtra ?? false,
@@ -292,6 +312,7 @@ export const snapshot = query({
       autoSoldOut,
       enabledAreas: locationPreparationAreas(location?.enabledPreparationAreas),
       serviceMode: location?.serviceMode ?? "mixed",
+      canEditMenu: canEditSharedMenu(staff),
       menuBackground: await loadMenuBackground(ctx, restaurant),
       categories,
       dishes: dishViews,
@@ -329,7 +350,7 @@ export const generateUploadUrl = mutation({
   args: {},
   returns: v.string(),
   handler: async (ctx) => {
-    await editor(ctx);
+    await menuEditor(ctx);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -338,7 +359,7 @@ export const createCategory = mutation({
   args: { name: v.string() },
   returns: v.id("dishCategories"),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const name = requiredText(args.name, "Nombre de la categoría", 80);
     const existing = await ctx.db
       .query("dishCategories")
@@ -361,7 +382,7 @@ export const updateCategory = mutation({
   args: { categoryId: v.id("dishCategories"), name: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const category = await ctx.db.get("dishCategories", args.categoryId);
     if (!category || category.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos esa categoría.");
@@ -383,7 +404,7 @@ export const toggleCategoryActive = mutation({
   args: { categoryId: v.id("dishCategories") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const category = await ctx.db.get("dishCategories", args.categoryId);
     if (!category || category.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos esa categoría.");
@@ -397,7 +418,7 @@ export const moveCategory = mutation({
   args: { categoryId: v.id("dishCategories"), direction: v.union(v.literal("up"), v.literal("down")) },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const categories = await ctx.db
       .query("dishCategories")
       .withIndex("by_organizationId_and_sortOrder", (q) => q.eq("organizationId", staff.organizationId))
@@ -418,7 +439,7 @@ export const removeCategory = mutation({
   args: { categoryId: v.id("dishCategories") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const category = await ctx.db.get("dishCategories", args.categoryId);
     if (!category || category.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos esa categoría.");
@@ -521,7 +542,7 @@ export const createDish = mutation({
   },
   returns: v.id("dishes"),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const name = requiredText(args.name, "Nombre del platillo", 100);
     const description = args.description?.trim().slice(0, 300) || undefined;
     const priceCents = safeInteger(args.priceCents, "Precio", 1);
@@ -571,7 +592,7 @@ export const updateDish = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const dish = await ctx.db.get("dishes", args.dishId);
     if (!dish || dish.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos ese platillo.");
@@ -625,7 +646,14 @@ export const toggleDishAvailable = mutation({
     if (!dish || dish.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos ese platillo.");
     }
-    await ctx.db.patch("dishes", dish._id, { isAvailable: !dish.isAvailable });
+    const availabilityMap = await loadLocationDishAvailability(ctx, staff.locationId);
+    const currentlyAvailable = resolveDishAvailability(dish, availabilityMap);
+    await setLocationDishAvailability(ctx, {
+      organizationId: staff.organizationId,
+      locationId: staff.locationId,
+      dishId: dish._id,
+      isAvailable: !currentlyAvailable,
+    });
     return null;
   },
 });
@@ -634,7 +662,7 @@ export const removeDish = mutation({
   args: { dishId: v.id("dishes") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const dish = await ctx.db.get("dishes", args.dishId);
     if (!dish || dish.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos ese platillo.");
@@ -733,7 +761,7 @@ export const createModifierGroup = mutation({
   },
   returns: v.id("modifierGroups"),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const name = requiredText(args.name, "Nombre del grupo", 80);
     const existing = await ctx.db
       .query("modifierGroups")
@@ -766,7 +794,7 @@ export const updateModifierGroup = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const group = await ctx.db.get("modifierGroups", args.groupId);
     if (!group || group.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos ese grupo de modificadores.");
@@ -793,7 +821,7 @@ export const removeModifierGroup = mutation({
   args: { groupId: v.id("modifierGroups") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const staff = await editor(ctx);
+    const staff = await menuEditor(ctx);
     const group = await ctx.db.get("modifierGroups", args.groupId);
     if (!group || group.organizationId !== staff.organizationId) {
       throw new ConvexError("No encontramos ese grupo de modificadores.");

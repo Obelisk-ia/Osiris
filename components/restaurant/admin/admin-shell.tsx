@@ -26,6 +26,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import { formatRoles, type ServiceMode, type StaffRole } from "@/lib/restaurant-roles";
 import { errorMessage, formatShortDate, initials, toRoman } from "@/lib/format";
@@ -103,9 +104,12 @@ export function AdminShell({
   const roleLabel = formatRoles(roles).join(" · ");
 
   const ownerCode = useQuery(api.restaurants.ownerCode, canQuery && isOwner ? {} : "skip");
+  const ownerBranches = useQuery(api.admin.branchesSnapshot, canQuery && isOwner ? {} : "skip");
   const cashierSnap = useQuery(api.cashier.snapshot, canQuery ? {} : "skip");
   const readyToPayCount = cashierSnap?.readyAccounts.length ?? 0;
   const rotateCode = useMutation(api.restaurants.rotateCode);
+  const switchBranch = useMutation(api.admin.switchBranch);
+  const [switchingBranch, setSwitchingBranch] = useState(false);
 
   const menuWrapRef = useRef<HTMLDivElement>(null);
 
@@ -127,7 +131,10 @@ export function AdminShell({
     };
   }, [accountMenuOpen]);
 
-  const navItems = serviceMode !== "a_la_carte" ? ADMIN_NAV_ITEMS : ADMIN_NAV_ITEMS.flatMap((item) => {
+  const visibleBaseItems = isOwner
+    ? ADMIN_NAV_ITEMS
+    : ADMIN_NAV_ITEMS.filter((item) => item.id !== "sucursales");
+  const navItems = serviceMode !== "a_la_carte" ? visibleBaseItems : visibleBaseItems.flatMap((item) => {
     if (item.id !== "buffet") return [item];
     return hasOpenReplenishments ? [{ ...item, href: "/cuenta/buffet" }] : [];
   });
@@ -138,6 +145,24 @@ export function AdminShell({
   const secondaryItems = navItems.filter((item) => !MOBILE_PRIMARY_IDS.has(item.id));
   const inMore = secondaryItems.some((item) => item.id === activeItem.id);
   const collageSrc = isOwner ? "/collage/osiris.webp" : "/collage/thot.webp";
+
+  async function handleSwitchBranch(nextLocationId: Id<"locations">) {
+    if (switchingBranch || !ownerBranches || nextLocationId === ownerBranches.currentLocationId) return;
+    setSwitchingBranch(true);
+    setAccountError(null);
+    try {
+      const target = ownerBranches.branches.find((b) => b._id === nextLocationId);
+      await switchBranch({ locationId: nextLocationId });
+      if (pathname === "/cuenta/buffet" && target?.serviceMode === "a_la_carte") {
+        router.replace("/cuenta/mesas");
+      }
+      router.refresh();
+    } catch (cause) {
+      setAccountError(errorMessage(cause, "No pudimos cambiar de sucursal."));
+    } finally {
+      setSwitchingBranch(false);
+    }
+  }
 
   async function handleCopyCode() {
     if (!ownerCode) return;
@@ -198,6 +223,28 @@ export function AdminShell({
           ))}
         </div>
       </div>
+
+      {isOwner && ownerBranches && ownerBranches.branches.length > 1 && (
+        <div className="az-who-code-block">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+            <Building2 className="size-3.5" aria-hidden="true" />
+            <span>Sucursal activa</span>
+          </div>
+          <select
+            aria-label="Cambiar sucursal activa"
+            className="az-select text-sm"
+            value={ownerBranches.currentLocationId}
+            disabled={switchingBranch}
+            onChange={(event) => void handleSwitchBranch(event.target.value as Id<"locations">)}
+          >
+            {ownerBranches.branches.map((branch) => (
+              <option key={branch._id} value={branch._id}>
+                {branch.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {isOwner && (
         <div className="az-who-code-block">
@@ -310,6 +357,24 @@ export function AdminShell({
             {restaurantName} · {locationName}
           </span>
         </div>
+        {isOwner && ownerBranches && ownerBranches.branches.length > 1 && (
+          <label className="hidden sm:inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Building2 className="size-3.5 shrink-0" aria-hidden="true" />
+            <select
+              aria-label="Cambiar de sucursal"
+              className="az-select h-8 py-0 px-2 text-xs font-medium text-foreground"
+              value={ownerBranches.currentLocationId}
+              disabled={switchingBranch}
+              onChange={(event) => void handleSwitchBranch(event.target.value as Id<"locations">)}
+            >
+              {ownerBranches.branches.map((branch) => (
+                <option key={branch._id} value={branch._id}>
+                  {branch.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <span className="az-top-date">{formatShortDate()}</span>
         <span className="az-status-pulse">
           <i aria-hidden="true" />
