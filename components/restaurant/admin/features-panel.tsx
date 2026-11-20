@@ -257,45 +257,46 @@ export function FeaturesPanel({ preloaded }: { preloaded: Preloaded<typeof api.a
             </div>
           </li>
 
-          {data.serviceMode === "buffet" && (
+          {data.serviceMode !== "a_la_carte" && (
             <li>
               <div className="grid gap-3 w-full">
-                <div className="az-row-main">
-                  <div className="az-row-text">
-                    <strong>Asignar mesas en el buffet</strong>
-                    <p className="text-sm text-muted-foreground">
-                      Actívalo para sentar grupos y cargar la entrada por persona a la cuenta. Apágalo si cada grupo elige su lugar.
-                    </p>
-                  </div>
-                  <label className="az-check shrink-0">
-                    <input type="checkbox" aria-label="Asignar mesas en el buffet" checked={buffetTableService}
-                      disabled={tableServiceDraft !== null}
-                      onChange={(event) => void toggleBuffetTableService(event.target.checked)} />
-                    <span>{buffetTableService ? "Activo" : "Apagado"}</span>
-                  </label>
-                </div>
-                {buffetTableService && (
-                  <form className="grid gap-3" onSubmit={(event) => void saveBuffetPrices(event)}>
-                    <div className="az-form-grid">
-                      <div className="az-field">
-                        <label htmlFor="buffet-adult-price">Tarifa de adulto ({data.currencyCode})</label>
-                        <input id="buffet-adult-price" name="adult-price" inputMode="decimal" required
-                          value={adultDraft ?? (data.buffetPrices ? centsToInput(data.buffetPrices.adultCents) : "")}
-                          onChange={(event) => setAdultDraft(event.target.value)} />
-                      </div>
-                      <div className="az-field">
-                        <label htmlFor="buffet-child-price">Tarifa de niño ({data.currencyCode})</label>
-                        <input id="buffet-child-price" name="child-price" inputMode="decimal" aria-describedby="buffet-child-price-note"
-                          value={childDraft ?? (data.buffetPrices?.childCents == null ? "" : centsToInput(data.buffetPrices.childCents))}
-                          onChange={(event) => setChildDraft(event.target.value)} />
-                      </div>
+                {data.serviceMode === "buffet" && (
+                  <div className="az-row-main">
+                    <div className="az-row-text">
+                      <strong>Asignar mesas en el buffet</strong>
+                      <p className="text-sm text-muted-foreground">
+                        Actívalo para sentar grupos y cargar la entrada por persona a la cuenta. Apágalo si cada grupo elige su lugar.
+                      </p>
                     </div>
-                    <p id="buffet-child-price-note" className="text-sm text-muted-foreground">En blanco usa la tarifa de adulto. Escribe 0 para cortesía.</p>
-                    <Button type="submit" variant="outline" size="sm" className="justify-self-start" disabled={savingPrices}>
-                      {savingPrices ? "Guardando…" : "Guardar tarifas"}
-                    </Button>
-                  </form>
+                    <label className="az-check shrink-0">
+                      <input type="checkbox" aria-label="Asignar mesas en el buffet" checked={buffetTableService}
+                        disabled={tableServiceDraft !== null}
+                        onChange={(event) => void toggleBuffetTableService(event.target.checked)} />
+                      <span>{buffetTableService ? "Activo" : "Apagado"}</span>
+                    </label>
+                  </div>
                 )}
+                <form className="grid gap-3" onSubmit={(event) => void saveBuffetPrices(event)}>
+                  <p className="text-sm text-muted-foreground">Las tarifas de entrada se muestran en el menú QR.</p>
+                  <div className="az-form-grid">
+                    <div className="az-field">
+                      <label htmlFor="buffet-adult-price">Tarifa de adulto ({data.currencyCode})</label>
+                      <input id="buffet-adult-price" name="adult-price" inputMode="decimal" required
+                        value={adultDraft ?? (data.buffetPrices ? centsToInput(data.buffetPrices.adultCents) : "")}
+                        onChange={(event) => setAdultDraft(event.target.value)} />
+                    </div>
+                    <div className="az-field">
+                      <label htmlFor="buffet-child-price">Tarifa de niño ({data.currencyCode})</label>
+                      <input id="buffet-child-price" name="child-price" inputMode="decimal" aria-describedby="buffet-child-price-note"
+                        value={childDraft ?? (data.buffetPrices?.childCents == null ? "" : centsToInput(data.buffetPrices.childCents))}
+                        onChange={(event) => setChildDraft(event.target.value)} />
+                    </div>
+                  </div>
+                  <p id="buffet-child-price-note" className="text-sm text-muted-foreground">En blanco usa la tarifa de adulto. Escribe 0 para cortesía.</p>
+                  <Button type="submit" variant="outline" size="sm" className="justify-self-start" disabled={savingPrices}>
+                    {savingPrices ? "Guardando…" : "Guardar tarifas"}
+                  </Button>
+                </form>
               </div>
             </li>
           )}

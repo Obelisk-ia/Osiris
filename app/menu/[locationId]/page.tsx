@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { io } from "next/cache";
 import { preloadQuery } from "convex/nextjs";
 import { Suspense } from "react";
 import { api } from "@/convex/_generated/api";
@@ -8,6 +9,7 @@ export const metadata: Metadata = { title: "La carta" };
 
 async function PublicMenuContent({ params }: { params: Promise<{ locationId: string }> }) {
   const { locationId } = await params;
+  await io();
   const preloaded = await preloadQuery(api.diner.publicMenu, { locationId });
   return <PublicMenuView preloaded={preloaded} />;
 }

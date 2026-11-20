@@ -31,6 +31,7 @@ import {
   UNIT_SHORT,
 } from "@/lib/format";
 import { AdminModal, AdminPageHead, ConfirmModal, EmptyState, ToastBanner, useToast } from "./admin-ui";
+import { MenuAppearancePanel } from "./menu-appearance-panel";
 
 type Snapshot = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.menu.snapshot>>>;
 type Dish = Snapshot["dishes"][number];
@@ -39,7 +40,7 @@ type ModifierGroup = Snapshot["modifierGroups"][number];
 type InventoryPicker = Snapshot["inventoryItems"][number];
 type PreparationArea = Snapshot["enabledAreas"][number];
 
-type MenuTab = "productos" | "categorias" | "modificadores" | "areas";
+type MenuTab = "productos" | "categorias" | "modificadores" | "areas" | "apariencia";
 
 const PREPARATION_AREAS: ReadonlyArray<{
   key: PreparationArea;
@@ -156,7 +157,14 @@ export function MenuPanel({ preloaded }: { preloaded: Preloaded<typeof api.menu.
           Áreas
           <span className="az-count">{data.enabledAreas.length}</span>
         </button>
+        <button type="button" className="az-tab" role="tab" aria-selected={tab === "apariencia"} onClick={() => setTab("apariencia")}>
+          Apariencia
+        </button>
       </div>
+
+      {tab === "apariencia" && (
+        <MenuAppearancePanel restaurantName={data.restaurantName} background={data.menuBackground} />
+      )}
 
       {tab === "productos" && (
         <div className="grid gap-4">

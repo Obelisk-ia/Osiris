@@ -49,6 +49,15 @@ export const preparationArea = v.union(
 );
 export const serviceMode = v.union(v.literal("a_la_carte"), v.literal("buffet"), v.literal("mixed"));
 export const buffetPrices = v.object({ adultCents: v.number(), childCents: v.union(v.number(), v.null()) });
+export const menuBackgroundSetting = v.union(
+  v.object({ kind: v.literal("color"), color: v.string() }),
+  v.object({ kind: v.literal("photo"), storageId: v.id("_storage") }),
+);
+export const menuBackgroundView = v.union(
+  v.object({ kind: v.literal("default") }),
+  v.object({ kind: v.literal("color"), color: v.string() }),
+  v.object({ kind: v.literal("photo"), url: v.string() }),
+);
 export const buffetAdmission = v.object({
   adults: v.number(), children: v.number(), adultCents: v.number(), childCents: v.number(),
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, usePreloadedQuery, type Preloaded } from "convex/react";
-import { Calendar, Check, Edit3, Info, Plus, Power, Search, Trash2, UtensilsCrossed } from "lucide-react";
+import { Calendar, Check, Copy, Edit3, Info, Plus, Power, Search, Trash2, UtensilsCrossed } from "lucide-react";
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { api } from "@/convex/_generated/api";
@@ -24,7 +24,7 @@ export function BuffetPanel({ preloaded }: { preloaded: Preloaded<typeof api.buf
   const toggleMenuActive = useMutation(api.buffet.toggleMenuActive);
   const removeMenu = useMutation(api.buffet.removeMenu);
 
-  const [modal, setModal] = useState<{ open: true; menu?: BuffetMenu } | null>(null);
+  const [modal, setModal] = useState<{ open: true; menu?: BuffetMenu; duplicate?: true } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<BuffetMenu | null>(null);
   const [deletePending, setDeletePending] = useState(false);
 
@@ -132,6 +132,15 @@ export function BuffetPanel({ preloaded }: { preloaded: Preloaded<typeof api.buf
                   </Button>
                   <Button
                     variant="outline"
+                    size="sm"
+                    aria-label={`Duplicar ${menu.name}`}
+                    onClick={() => setModal({ open: true, menu, duplicate: true })}
+                  >
+                    <Copy className="size-3.5" aria-hidden="true" />
+                    Duplicar
+                  </Button>
+                  <Button
+                    variant="outline"
                     size="icon-sm"
                     aria-label={`Editar ${menu.name}`}
                     onClick={() => setModal({ open: true, menu })}
@@ -168,17 +177,18 @@ export function BuffetPanel({ preloaded }: { preloaded: Preloaded<typeof api.buf
       {modal && (
         <BuffetMenuModal
           menu={modal.menu}
+          duplicate={modal.duplicate}
           availableDishes={data.availableDishes}
           currencyCode={data.currencyCode}
           timeZone={data.timeZone}
           onClose={() => setModal(null)}
           onSave={async (payload) => {
-            if (modal.menu) {
+            if (modal.menu && !modal.duplicate) {
               await updateMenu({ menuId: modal.menu._id, ...payload });
               showToast("Menú de buffet actualizado");
             } else {
               await createMenu(payload);
-              showToast("Menú de buffet creado");
+              showToast(modal.duplicate ? "Menú de buffet duplicado" : "Menú de buffet creado");
             }
             setModal(null);
           }}
@@ -204,6 +214,7 @@ export function BuffetPanel({ preloaded }: { preloaded: Preloaded<typeof api.buf
 
 function BuffetMenuModal({
   menu,
+  duplicate = false,
   availableDishes,
   currencyCode,
   timeZone,
@@ -211,6 +222,7 @@ function BuffetMenuModal({
   onSave,
 }: {
   menu?: BuffetMenu;
+  duplicate?: boolean;
   availableDishes: DishOption[];
   currencyCode: string;
   timeZone: string;
@@ -224,8 +236,8 @@ function BuffetMenuModal({
   }) => Promise<void>;
 }) {
   const [name, setName] = useState(menu?.name ?? "");
-  const [menuDate, setMenuDate] = useState(() => menu?.menuDate ?? todayIsoDate(timeZone));
-  const [isActive, setIsActive] = useState(menu?.isActive ?? true);
+  const [menuDate, setMenuDate] = useState(() => duplicate ? todayIsoDate(timeZone) : menu?.menuDate ?? todayIsoDate(timeZone));
+  const [isActive, setIsActive] = useState(!duplicate && (menu?.isActive ?? true));
   const [selectedIds, setSelectedIds] = useState<Id<"dishes">[]>(() =>
     menu ? menu.dishes.map((d) => d.dishId) : [],
   );
@@ -278,7 +290,7 @@ function BuffetMenuModal({
 
   return (
     <AdminModal
-      title={menu ? `Editar ${menu.name}` : "Nuevo menú de buffet"}
+      title={duplicate ? "Duplicar menú de buffet" : menu ? `Editar ${menu.name}` : "Nuevo menú de buffet"}
       wide
       onClose={onClose}
       footer={

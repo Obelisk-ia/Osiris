@@ -1,11 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 test.use({ actionTimeout: 10_000 });
 
 test("salón, cocina y caja operan una sucursal de buffet", async ({ page: owner, browser, baseURL }, testInfo) => {
   test.skip(process.env.OSIRIS_TEST_LIVE_SIGNUP !== "1", "Creates disposable accounts in the development backend.");
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const id = randomUUID();
   const password = `Cedar meadow! ${randomUUID()}`;
   const dishName = "Pollo asado";
@@ -51,13 +52,37 @@ test("salón, cocina y caja operan una sucursal de buffet", async ({ page: owner
   await expect(owner.getByRole("dialog")).toHaveCount(0);
   await expect(owner.getByText(menuName, { exact: true })).toBeVisible();
 
+  await owner.getByRole("button", { name: `Duplicar ${menuName}` }).click();
+  const copy = owner.getByRole("dialog", { name: "Duplicar menú de buffet" });
+  await expect(copy.getByRole("checkbox", { name: /Pollo asado/ })).toBeChecked();
+  await expect(copy.getByLabel("Estación del buffet")).toHaveValue("Línea caliente");
+  await expect(copy.getByLabel("Porciones por bandeja")).toHaveValue("8");
+  await expect(copy.getByLabel("Activo para esta fecha")).not.toBeChecked();
+  await copy.getByLabel("Nombre", { exact: true }).fill("Buffet del próximo servicio");
+  await copy.getByLabel("Fecha", { exact: true }).fill("2099-01-01");
+  await copy.getByRole("button", { name: "Guardar", exact: true }).click();
+  await expect(owner.getByRole("listitem").filter({ hasText: "Buffet del próximo servicio" })).toContainText("Inactivo");
+
+  await owner.goto("/cuenta/administracion/codigos-qr");
+  const publicMenu = owner.getByRole("link", { name: "Abrir carta", exact: true });
+  await expect(publicMenu).toHaveAttribute("href", /\/menu\//);
+  const publicPath = (await publicMenu.getAttribute("href"))!;
   const waiterContext = await browser.newContext({
     baseURL, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
   });
   const chefContext = await browser.newContext({ baseURL });
+  const guestContext = await browser.newContext({
+    baseURL, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
+  });
   try {
     const waiter = await waiterContext.newPage();
     const chef = await chefContext.newPage();
+    const guest = await guestContext.newPage();
+    await guest.goto(publicPath);
+    const today = guest.getByRole("region", { name: "Hoy en el buffet" });
+    await expect(today.getByText(dishName, { exact: true })).toBeVisible();
+    await expect(guest.getByRole("searchbox", { name: "Buscar en la carta" })).toBeVisible();
+    await expect(today.getByText("Buffet del próximo servicio")).toHaveCount(0);
     await signUp(waiter, "waiter", code);
     await signUp(chef, "chef", code);
 
@@ -121,6 +146,8 @@ test("salón, cocina y caja operan una sucursal de buffet", async ({ page: owner
       .getByRole("link", { name: "Buffet", exact: true });
     await mode.selectOption("a_la_carte");
     await expect(waiter.getByText("Buffet desactivado", { exact: true })).toBeVisible();
+    await expect(today).toHaveCount(0);
+    await expect(guest.getByText(dishName, { exact: true })).toBeVisible();
     await expect(mobileBuffet).toBeVisible();
     await expect(adminBuffet).toHaveAttribute("href", "/cuenta/buffet");
 
@@ -178,13 +205,6 @@ test("salón, cocina y caja operan una sucursal de buffet", async ({ page: owner
     await owner.goto("/cuenta/mesas");
     await expect(table).toHaveAccessibleName(/Mesa 1, Libre/);
 
-    await owner.goto("/cuenta/administracion/caracteristicas");
-    await assignedTables.uncheck();
-    await expect(assignedTables).toBeEnabled();
-    await expect(owner.getByLabel("Tarifa de adulto (MXN)")).toHaveCount(0);
-    await waiter.goto("/cuenta/mesas");
-    await expect(waiter).toHaveURL(/\/cuenta\/buffet$/);
-
     await owner.goto("/cuenta/administracion/menu");
     await owner.getByRole("button", { name: "Nuevo producto" }).click();
     await owner.getByLabel("Título del platillo").fill("Limonada");
@@ -192,14 +212,65 @@ test("salón, cocina y caja operan una sucursal de buffet", async ({ page: owner
     await owner.getByRole("checkbox", { name: "Vender como extra en modo Solo buffet" }).check();
     await owner.getByRole("button", { name: "Guardar", exact: true }).click();
     await expect(owner.getByRole("dialog")).toHaveCount(0);
+
+    await owner.getByRole("tab", { name: "Apariencia" }).click();
+    await owner.getByRole("radio", { name: "Color sólido" }).check();
+    await owner.getByLabel("Color del fondo").fill("#357b53");
+    await expect(owner.locator("figure [data-menu-background]")).toHaveAttribute("data-menu-background", "color");
+    await owner.getByRole("button", { name: "Guardar fondo" }).click();
+    await expect(guest.locator("[data-menu-background]")).toHaveAttribute("data-menu-background", "color");
+
     await owner.goto("/cuenta/administracion/codigos-qr");
-    const publicMenu = owner.getByRole("link", { name: "Abrir carta", exact: true });
-    await expect(publicMenu).toHaveAttribute("href", /\/menu\//);
-    await owner.goto((await publicMenu.getAttribute("href"))!);
-    await expect(owner.getByRole("heading", { name: /Extras del buffet/ })).toBeVisible();
-    await expect(owner.getByText("Limonada", { exact: true })).toBeVisible();
-    await expect(owner.getByText(dishName, { exact: true })).toHaveCount(0);
+    const tableLink = owner.getByRole("link", { name: "Abrir vista comensal" });
+    await expect(tableLink).toHaveAttribute("href", /\/mesa\//);
+    const tablePath = (await tableLink.getAttribute("href"))!;
+    await guest.goto(tablePath);
+    await expect(guest.getByRole("heading", { name: /Hoy en el buffet/ })).toBeVisible();
+    await expect(guest.getByRole("heading", { name: "Extras del buffet" })).toBeVisible();
+    await expect(guest.getByText("Limonada", { exact: true })).toBeVisible();
+    await expect(guest.getByRole("tab", { name: "Mi mesa" })).toBeVisible();
+    await expect(guest.locator("[data-menu-background]")).toHaveAttribute("data-menu-background", "color");
+
+    await owner.goto("/cuenta/administracion/menu");
+    await owner.getByRole("tab", { name: "Apariencia" }).click();
+    await owner.getByRole("radio", { name: "Foto", exact: true }).check();
+    await owner.getByLabel("Elegir foto del fondo").setInputFiles(path.join(process.cwd(), "public/collage/osiris.webp"));
+    await expect(owner.locator("figure [data-menu-background='photo'] img")).toHaveAttribute("src", /^blob:/);
+    await owner.screenshot({ path: testInfo.outputPath("apariencia-menu.png") });
+    await owner.getByRole("button", { name: "Guardar fondo" }).click();
+    await expect(owner.getByText("Fondo del menú actualizado")).toBeVisible();
+    const photo = guest.locator("[data-menu-background='photo'] img");
+    await expect(photo).toHaveAttribute("src", /^https:/);
+    await expect.poll(() => photo.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+
+    await owner.goto("/cuenta/administracion/caracteristicas");
+    await assignedTables.uncheck();
+    await expect(assignedTables).not.toBeChecked();
+    await expect(owner.getByLabel("Tarifa de adulto (MXN)")).toHaveValue("200.00");
+    await waiter.goto("/cuenta/mesas");
+    await expect(waiter).toHaveURL(/\/cuenta\/buffet$/);
+
+    await expect(guest).toHaveURL(new URL(publicPath, baseURL).href);
+    await guest.goto(tablePath);
+    await expect(guest).toHaveURL(new URL(publicPath, baseURL).href);
+    await expect(today.getByText(dishName, { exact: true })).toBeVisible();
+    await expect(today.getByText(/200\.00/)).toBeVisible();
+    await expect(today.getByText(/90\.00/)).toBeVisible();
+    await expect(guest.getByText("Limonada", { exact: true })).toHaveCount(0);
+    await expect(guest.getByRole("tab", { name: "Mi mesa" })).toHaveCount(0);
+    await expect(guest.getByRole("button", { name: "Llamar mesero" })).toHaveCount(0);
+    await expect(photo).toHaveAttribute("src", /^https:/);
+    await guest.screenshot({ path: testInfo.outputPath("qr-buffet-movil.png"), fullPage: true });
+
+    await owner.goto("/cuenta/administracion/menu");
+    await owner.getByRole("tab", { name: "Apariencia" }).click();
+    await owner.getByRole("radio", { name: "Fondo de Osiris" }).check();
+    await owner.getByRole("button", { name: "Guardar fondo" }).click();
+    await expect(guest.locator("[data-menu-background]")).toHaveAttribute("data-menu-background", "default");
+    await owner.goto("/cuenta/administracion/buffet");
+    await owner.getByRole("listitem").filter({ hasText: menuName }).getByRole("button", { name: "Desactivar" }).click();
+    await expect(today.getByText("El menú de buffet de hoy aún no está publicado.")).toBeVisible();
   } finally {
-    await Promise.all([waiterContext.close(), chefContext.close()]);
+    await Promise.all([waiterContext.close(), chefContext.close(), guestContext.close()]);
   }
 });

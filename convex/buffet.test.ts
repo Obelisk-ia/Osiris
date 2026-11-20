@@ -46,6 +46,29 @@ async function fixture() {
 }
 
 describe("buffet replenishment", () => {
+  it("publishes the selected day's active buffet for the branch without exposing replenishment settings", async () => {
+    const f = await fixture();
+    const { registration: other } = await createRestaurant(f.t, "other-owner@example.com");
+    await f.owner.mutation(api.buffet.createMenu, { ...f.menuSettings, name: "Draft", isActive: false });
+    const nextDay = "2099-01-01";
+    await f.owner.mutation(api.buffet.createMenu, { ...f.menuSettings, name: "Later", menuDate: nextDay });
+    await f.owner.mutation(api.admin.updateFeatures, { buffetPrices: { adultCents: 24000, childCents: 0 } });
+
+    const args = { locationId: f.scope.locationId, menuDate: f.menuDate };
+    expect(await f.t.query(api.buffet.publicMenuForDate, args)).toEqual({
+      prices: { adultCents: 24000, childCents: 0 },
+      menus: [{
+        _id: f.menuId,
+        name: "Comida",
+        dishes: [{ _id: f.dishId, name: "Pollo asado", description: "", destination: "Línea caliente", photoUrl: null }],
+      }],
+    });
+    expect(await f.t.query(api.buffet.publicMenuForDate, { ...args, locationId: other.location._id }))
+      .toEqual({ prices: null, menus: [] });
+    await f.owner.mutation(api.admin.updateFeatures, { serviceMode: "a_la_carte" });
+    expect(await f.t.query(api.buffet.publicMenuForDate, args)).toEqual({ prices: null, menus: [] });
+  });
+
   it("seats and checks out a group without a kitchen order and retains rates when extras are added", async () => {
     const f = await fixture();
     const otherWaiter = await f.employee("waiter", "another-waiter");
@@ -76,6 +99,8 @@ describe("buffet replenishment", () => {
     await f.owner.mutation(api.admin.updateFeatures, {
       buffetPrices: { adultCents: 28000, childCents: 15000 }, buffetTableService: false,
     });
+    expect(await f.t.query(api.diner.tableByQrToken, { qrToken: table.qrToken }))
+      .toMatchObject({ status: "ready", dishes: [], account: { totalCents: 59000 } });
     expect(await f.waiter.query(api.waiter.tablesSnapshot)).toMatchObject({ tableServiceEnabled: false, busyTables: [{ accountId }] });
     const extraId = await f.owner.mutation(api.menu.createDish, {
       name: "Agua de jamaica", areas: ["kitchen"], priceCents: 4500, isPublished: true,
@@ -90,6 +115,9 @@ describe("buffet replenishment", () => {
       accountId, payments: [{ method: "efectivo", receivedCents: 63500 }],
     })).resolves.toMatchObject({ closed: true });
     expect((await f.owner.query(api.floor.snapshot)).tables[0].status).toBe("empty");
+    expect(await f.t.query(api.diner.tableByQrToken, { qrToken: table.qrToken }))
+      .toEqual({ status: "buffet", locationId: f.scope.locationId });
+    await expect(f.t.mutation(api.diner.callWaiter, { qrToken: table.qrToken })).rejects.toThrow(/asientos libres/);
     expect(await f.waiter.query(api.waiter.tablesSnapshot)).toMatchObject({ tableServiceEnabled: false, busyTables: [], freeTables: [] });
     await expect(f.waiter.mutation(api.waiter.seatBuffetParty, { ...args, requestId: "disabled" })).rejects.toThrow(/no tiene activo/);
 
