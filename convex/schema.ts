@@ -2,7 +2,7 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import {
   accountState, buffetAdmission, buffetPrices, canvas, cashMovementKind, discountKind, inventoryKind, notificationKind, orderStatus,
-  paymentMethod, paymentStatus, preparationArea, preparationStatus, reportedPayment, staffRole, stationRole,
+  menuBackgroundSetting, paymentMethod, paymentStatus, preparationArea, preparationStatus, reportedPayment, staffRole, stationRole,
   serviceMode, submissionState, tableShape, tableStatus,
 } from "./model/validators";
 
@@ -15,6 +15,7 @@ export default defineSchema({
 
   organizations: defineTable({
     name: v.string(), currencyCode: v.string(), firstLocationId: v.optional(v.id("locations")),
+    menuBackground: v.optional(menuBackgroundSetting),
   }),
   locations: defineTable({
     ...organization, name: v.string(), address: v.optional(v.string()), timeZone: v.string(),

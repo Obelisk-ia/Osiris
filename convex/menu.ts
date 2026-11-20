@@ -4,7 +4,8 @@ import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/s
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireStaff, requiredText, safeInteger } from "./model/access";
 import { resolveDishAreas } from "./model/orders";
-import { preparationArea, serviceMode } from "./model/validators";
+import { menuBackgroundView, preparationArea, serviceMode } from "./model/validators";
+import { MAX_MENU_BACKGROUND_BYTES, type MenuBackground } from "../lib/menu-appearance";
 import { locationPreparationAreas, PREPARATION_AREAS, type PreparationArea } from "../lib/restaurant-roles";
 
 const EDITORS = ["owner", "manager"] as const;
@@ -13,6 +14,54 @@ const unitValidator = v.union(v.literal("g"), v.literal("ml"), v.literal("each")
 async function editor(ctx: MutationCtx | QueryCtx) {
   return await requireStaff(ctx, undefined, undefined, EDITORS);
 }
+
+export async function loadMenuBackground(ctx: QueryCtx, restaurant: Doc<"organizations"> | null): Promise<MenuBackground> {
+  const background = restaurant?.menuBackground;
+  if (background?.kind === "color") return background;
+  if (background?.kind === "photo") {
+    const url = await ctx.storage.getUrl(background.storageId);
+    if (url) return { kind: "photo", url };
+  }
+  return { kind: "default" };
+}
+
+function backgroundImageType(bytes: ArrayBuffer) {
+  const prefix = new Uint8Array(bytes, 0, Math.min(12, bytes.byteLength));
+  if ([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, index) => prefix[index] === byte)) return "image/png";
+  if (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff) return "image/jpeg";
+  if (String.fromCharCode(...prefix.slice(0, 4)) === "RIFF" &&
+      String.fromCharCode(...prefix.slice(8, 12)) === "WEBP") return "image/webp";
+  throw new ConvexError("Elige una imagen JPG, PNG o WebP válida.");
+}
+
+export const updateMenuBackground = mutation({
+  args: { background: v.union(
+    v.object({ kind: v.literal("default") }),
+    v.object({ kind: v.literal("color"), color: v.string() }),
+    v.object({ kind: v.literal("photo"), bytes: v.bytes() }),
+  ) },
+  returns: v.null(),
+  handler: async (ctx, { background }) => {
+    const staff = await editor(ctx);
+    const restaurant = await ctx.db.get("organizations", staff.organizationId);
+    if (!restaurant) throw new ConvexError("No encontramos tu restaurante.");
+
+    let next: Doc<"organizations">["menuBackground"];
+    if (background.kind === "color") {
+      if (!/^#[0-9a-f]{6}$/i.test(background.color)) throw new ConvexError("Elige un color válido.");
+      next = { kind: "color", color: background.color.toLowerCase() };
+    } else if (background.kind === "photo") {
+      if (background.bytes.byteLength > MAX_MENU_BACKGROUND_BYTES) throw new ConvexError("La imagen debe pesar hasta 3 MB.");
+      const type = backgroundImageType(background.bytes);
+      const storageId = await ctx.storage.store(new Blob([background.bytes], { type }));
+      next = { kind: "photo", storageId };
+    }
+
+    if (restaurant.menuBackground?.kind === "photo") await ctx.storage.delete(restaurant.menuBackground.storageId);
+    await ctx.db.patch("organizations", restaurant._id, { menuBackground: next });
+    return null;
+  },
+});
 
 function normalizeAreas(raw: readonly PreparationArea[]): PreparationArea[] {
   return PREPARATION_AREAS.filter((area) => raw.includes(area));
@@ -82,6 +131,7 @@ export const snapshot = query({
     locationName: v.string(),
     currencyCode: v.string(),
     serviceMode,
+    menuBackground: menuBackgroundView,
     autoSoldOut: v.boolean(),
     enabledAreas: v.array(preparationArea),
     categories: v.array(schema.doc("dishCategories")),
@@ -237,6 +287,7 @@ export const snapshot = query({
       autoSoldOut,
       enabledAreas: locationPreparationAreas(location?.enabledPreparationAreas),
       serviceMode: location?.serviceMode ?? "mixed",
+      menuBackground: await loadMenuBackground(ctx, restaurant),
       categories,
       dishes: dishViews,
       modifierGroups: modifierGroupViews,

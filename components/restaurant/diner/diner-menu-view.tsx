@@ -14,15 +14,20 @@ import {
   Utensils,
 } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "@/convex/_generated/api";
 import { ConfirmModal, EmptyState, ToastBanner, useToast } from "@/components/restaurant/admin/admin-ui";
 import { Button } from "@/components/ui/button";
 import { errorMessage, formatDateTime, formatMoney, toRoman } from "@/lib/format";
+import { BuffetToday } from "./buffet-today";
+import { MenuBackdrop } from "./menu-backdrop";
 
 type TableSnapshot = NonNullable<ReturnType<typeof usePreloadedQuery<typeof api.diner.tableByQrToken>>>;
-type DinerDish = Extract<TableSnapshot, { status: "ready" }>["dishes"][number];
-type DinerCategory = Extract<TableSnapshot, { status: "ready" }>["categories"][number];
+type DinerMenu = Pick<Extract<TableSnapshot, { status: "ready" }>,
+  "categories" | "dishes" | "locationId" | "timeZone" | "currencyCode" | "serviceMode">;
+type DinerDish = DinerMenu["dishes"][number];
+type DinerCategory = DinerMenu["categories"][number];
 
 const ITEM_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   ordered: { label: "Enviado", cls: "" },
@@ -191,6 +196,42 @@ function MenuCatalog({
   );
 }
 
+function DinerMenuContents({ menu }: { menu: DinerMenu }) {
+  const buffetOnly = menu.serviceMode === "buffet";
+
+  return (
+    <>
+      {menu.serviceMode !== "a_la_carte" && (
+        <BuffetToday
+          locationId={menu.locationId}
+          timeZone={menu.timeZone}
+          currencyCode={menu.currencyCode}
+          buffetOnly={buffetOnly}
+        />
+      )}
+      {(!buffetOnly || menu.dishes.length > 0) && (
+        <section className="grid gap-4">
+          {buffetOnly && <h2 className="font-heading text-2xl font-extrabold tracking-tight">Extras del buffet</h2>}
+          <MenuCatalog
+            categories={menu.categories}
+            dishes={menu.dishes}
+            currencyCode={menu.currencyCode}
+            buffetOnly={buffetOnly}
+          />
+        </section>
+      )}
+    </>
+  );
+}
+
+function DinerMenuTitle({ buffetOnly }: { buffetOnly: boolean }) {
+  return (
+    <h1 className="editorial-title">
+      {buffetOnly ? <>Hoy en el <em>buffet</em></> : <>La <em>carta</em></>}<span className="coral-dot">.</span>
+    </h1>
+  );
+}
+
 export function PublicMenuView({
   preloaded,
 }: {
@@ -216,10 +257,7 @@ export function PublicMenuView({
 
   return (
     <div className="relative min-h-svh overflow-x-clip">
-      <div className="az-backdrop" aria-hidden="true">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img className="az-backdrop-img" src="/collage/hathor.webp" alt="" />
-      </div>
+      <MenuBackdrop background={data.menuBackground} />
 
       <header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-border bg-[#efe7d2ee] px-5 py-3.5 backdrop-blur-md">
         <div className="flex items-baseline gap-2 min-w-0">
@@ -234,22 +272,16 @@ export function PublicMenuView({
 
       <main className="relative z-10 mx-auto max-w-5xl px-5 py-8 pb-16 grid gap-6">
         <header className="az-page-head">
-          <p className="restaurant-eyebrow">{data.restaurantName} · {data.locationName}</p>
-          <h1 className="editorial-title">
-            {buffetOnly ? <>Extras del <em>buffet</em></> : <>La <em>carta</em></>}<span className="coral-dot">.</span>
-          </h1>
-          <p>
-            {buffetOnly ? "Consulta los productos que puedes pedir por separado." : "Consulta nuestros platillos, opciones y disponibilidad en vivo."}{" "}
-            Para pedir o solicitar tu cuenta, escanea el código QR de tu mesa.
-          </p>
+          {data.locationName !== data.restaurantName && (
+            <p className="restaurant-eyebrow">{data.locationName}</p>
+          )}
+          <DinerMenuTitle buffetOnly={buffetOnly} />
+          {!buffetOnly && (
+            <p>Consulta nuestros platillos, opciones y disponibilidad en vivo. Para solicitar tu cuenta, escanea el código QR de tu mesa.</p>
+          )}
         </header>
 
-        <MenuCatalog
-          categories={data.categories}
-          dishes={data.dishes}
-          currencyCode={data.currencyCode}
-          buffetOnly={buffetOnly}
-        />
+        <DinerMenuContents menu={data} />
       </main>
     </div>
   );
@@ -265,12 +297,28 @@ export function DinerTableView({
   const data = usePreloadedQuery(preloaded);
   const callWaiter = useMutation(api.diner.callWaiter);
   const requestBill = useMutation(api.diner.requestBill);
+  const router = useRouter();
   const { toast, showToast } = useToast();
 
   const [tab, setTab] = useState<"carta" | "mesa">("carta");
   const [calling, setCalling] = useState(false);
   const [requestingBill, setRequestingBill] = useState(false);
   const [confirmBillOpen, setConfirmBillOpen] = useState(false);
+
+  const buffetLink = data.status === "buffet" ? `/menu/${data.locationId}` : null;
+  useEffect(() => {
+    if (buffetLink) router.replace(buffetLink);
+  }, [buffetLink, router]);
+
+  if (data.status === "buffet") {
+    return (
+      <main className="site-wrap account-wrap">
+        <Link href={`/menu/${data.locationId}`} className="site-button inline-flex items-center justify-center bg-foreground text-card">
+          Ver el buffet de hoy
+        </Link>
+      </main>
+    );
+  }
 
   if (data.status === "invalid") {
     return (
@@ -344,11 +392,7 @@ export function DinerTableView({
 
   return (
     <div className="relative min-h-svh overflow-x-clip pb-24">
-      <div className="az-backdrop" aria-hidden="true">
-        {/* Hathor is the guest/hospitality goddess in Atelier Zero */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img className="az-backdrop-img" src="/collage/hathor.webp" alt="" />
-      </div>
+      <MenuBackdrop background={data.menuBackground} />
 
       <header className="sticky top-0 z-20 border-b border-border bg-[#efe7d2f0] backdrop-blur-md">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-5 py-3">
@@ -385,7 +429,7 @@ export function DinerTableView({
               onClick={() => setTab("carta")}
             >
               <BookOpen className="size-4" aria-hidden="true" />
-              <span>{buffetOnly ? "Extras" : "La carta"}</span>
+              <span>{buffetOnly ? "Buffet" : "La carta"}</span>
             </button>
             <button
               type="button"
@@ -411,20 +455,11 @@ export function DinerTableView({
               <p className="restaurant-eyebrow">
                 {data.table.tableNumber} · {data.table.sectionName}
               </p>
-              <h1 className="editorial-title">
-                {buffetOnly ? <>Extras del <em>buffet</em></> : <>La <em>carta</em></>}<span className="coral-dot">.</span>
-              </h1>
-              <p>
-                {buffetOnly ? "Pide estos extras por separado con tu mesero." : "Explora el menú en vivo y llama a tu mesero cuando estés listo para ordenar."}
-              </p>
+              <DinerMenuTitle buffetOnly={buffetOnly} />
+              {!buffetOnly && <p>Explora el menú en vivo y llama a tu mesero cuando estés listo para ordenar.</p>}
             </header>
 
-            <MenuCatalog
-              categories={data.categories}
-              dishes={data.dishes}
-              currencyCode={data.currencyCode}
-              buffetOnly={buffetOnly}
-            />
+            <DinerMenuContents menu={data} />
           </>
         )}
 
@@ -617,7 +652,9 @@ export function DinerTableView({
               <EmptyState
                 icon={<Utensils className="size-7" aria-hidden="true" />}
                 title="Tu mesa está lista"
-                description="Revisa la carta y cuando gustes llama a tu mesero para tomar tu orden."
+                description={buffetOnly
+                  ? "Consulta el buffet del día y llama a tu mesero si necesitas ayuda."
+                  : "Revisa la carta y cuando gustes llama a tu mesero para tomar tu orden."}
                 action={
                   <Button
                     type="button"
@@ -625,7 +662,7 @@ export function DinerTableView({
                     onClick={() => setTab("carta")}
                   >
                     <BookOpen className="size-4" aria-hidden="true" />
-                    Ver la carta
+                    {buffetOnly ? "Ver el buffet" : "Ver la carta"}
                   </Button>
                 }
               />

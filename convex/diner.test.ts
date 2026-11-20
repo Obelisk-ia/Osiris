@@ -5,6 +5,32 @@ import { authenticatedCaller, createRestaurant, setupRestaurantTest } from "../t
 import { api } from "./_generated/api";
 
 describe("public QR diner menu, call waiter, and delivery-gated requestBill", () => {
+  it("serves the restaurant's menu background and only allows editors to change it", async () => {
+    const t = setupRestaurantTest();
+    const { owner, registration, code } = await createRestaurant(t);
+    const { registration: other } = await createRestaurant(t, "other-background@example.com");
+    const waiter = await authenticatedCaller(t, "waiter-background@example.com");
+    await waiter.mutation(api.restaurants.completeRegistration, {
+      registration: { kind: "staff", displayName: "Javier", code, roles: ["waiter"] },
+    });
+
+    const background = { kind: "color", color: "#357b53" } as const;
+    await expect(waiter.mutation(api.menu.updateMenuBackground, { background })).rejects.toThrow(/permiso/);
+    await owner.mutation(api.menu.updateMenuBackground, { background });
+    const args = { locationId: registration.location._id };
+    expect(await t.query(api.diner.publicMenu, args)).toMatchObject({ menuBackground: background });
+    expect(await t.query(api.diner.publicMenu, { locationId: other.location._id }))
+      .toMatchObject({ menuBackground: { kind: "default" } });
+
+    const invalidImage = new TextEncoder().encode("<svg/>").buffer;
+    await expect(owner.mutation(api.menu.updateMenuBackground, { background: { kind: "photo", bytes: invalidImage } }))
+      .rejects.toThrow(/imagen JPG, PNG o WebP/);
+    expect(await t.query(api.diner.publicMenu, args)).toMatchObject({ menuBackground: background });
+
+    await owner.mutation(api.menu.updateMenuBackground, { background: { kind: "default" } });
+    expect(await t.query(api.diner.publicMenu, args)).toMatchObject({ menuBackground: { kind: "default" } });
+  });
+
   it("shows live menu & unlocks Pedir la cuenta ONLY after all plates are delivered", async () => {
     const t = setupRestaurantTest();
     const { owner, code } = await createRestaurant(t);

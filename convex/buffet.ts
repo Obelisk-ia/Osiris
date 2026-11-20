@@ -5,7 +5,7 @@ import { requireStaff, requiredText, safeInteger } from "./model/access";
 import { buffetBatchIngredients } from "./model/inventory";
 import { emitNotification } from "./model/notifications";
 import { ensureStationForArea, resolveDishAreas } from "./model/orders";
-import { preparationArea, preparationStatus, serviceMode } from "./model/validators";
+import { buffetPrices, preparationArea, preparationStatus, serviceMode } from "./model/validators";
 import { todayIsoDate } from "../lib/format";
 import { locationPreparationAreas, PREPARATION_AREA_META } from "../lib/restaurant-roles";
 
@@ -28,6 +28,55 @@ function validDate(value: string) {
   }
   return clean;
 }
+
+function activeMenusForDate(ctx: QueryCtx, locationId: Id<"locations">, menuDate: string) {
+  return ctx.db.query("buffetMenus")
+    .withIndex("by_locationId_and_isActive_and_menuDate", (q) =>
+      q.eq("locationId", locationId).eq("isActive", true).eq("menuDate", menuDate))
+    .take(50);
+}
+
+function menuDishes(ctx: QueryCtx, menuId: Id<"buffetMenus">) {
+  return ctx.db.query("buffetMenuDishes")
+    .withIndex("by_buffetMenuId_and_dishId", (q) => q.eq("buffetMenuId", menuId))
+    .take(80);
+}
+
+export const publicMenuForDate = query({
+  args: { locationId: v.id("locations"), menuDate: v.string() },
+  returns: v.object({
+    prices: v.union(buffetPrices, v.null()),
+    menus: v.array(v.object({
+      _id: v.id("buffetMenus"), name: v.string(),
+      dishes: v.array(v.object({
+        _id: v.id("dishes"), name: v.string(), description: v.string(), destination: v.string(),
+        photoUrl: v.union(v.string(), v.null()),
+      })),
+    })),
+  }),
+  handler: async (ctx, { locationId, menuDate }) => {
+    const location = await ctx.db.get("locations", locationId);
+    if (!location || location.serviceMode === "a_la_carte") return { prices: null, menus: [] };
+
+    const menus = await activeMenusForDate(ctx, locationId, validDate(menuDate));
+    const views = await Promise.all(menus.map(async (menu) => {
+      const links = await menuDishes(ctx, menu._id);
+      const dishes = await Promise.all(links.sort((a, b) => a.sortOrder - b.sortOrder).map(async (link) => {
+        const dish = await ctx.db.get("dishes", link.dishId);
+        if (!dish || dish.organizationId !== location.organizationId) return null;
+        return {
+          _id: dish._id,
+          name: dish.name,
+          description: dish.description ?? "",
+          destination: link.destination ?? DEFAULT_DESTINATION,
+          photoUrl: dish.photoId ? await ctx.storage.getUrl(dish.photoId) : null,
+        };
+      }));
+      return { _id: menu._id, name: menu.name, dishes: dishes.filter((dish) => dish !== null) };
+    }));
+    return { prices: location.buffetPrices ?? null, menus: views.filter((menu) => menu.dishes.length > 0) };
+  },
+});
 
 const buffetDishView = v.object({
   dishId: v.id("dishes"),
@@ -353,15 +402,10 @@ export const serviceSnapshot = query({
     if (!location || location.serviceMode === "a_la_carte") {
       return { enabled: false, menus: [], active, recent };
     }
-    const menus = await ctx.db.query("buffetMenus")
-      .withIndex("by_locationId_and_isActive_and_menuDate", (q) =>
-        q.eq("locationId", staff.locationId).eq("isActive", true).eq("menuDate", validDate(menuDate)))
-      .take(50);
+    const menus = await activeMenusForDate(ctx, staff.locationId, validDate(menuDate));
     const openKeys = new Set(active.map((row) => `${row.dishId}:${destinationKey(row.destination)}`));
     const menuViews = await Promise.all(menus.map(async (menu) => {
-      const links = await ctx.db.query("buffetMenuDishes")
-        .withIndex("by_buffetMenuId_and_dishId", (q) => q.eq("buffetMenuId", menu._id))
-        .take(80);
+      const links = await menuDishes(ctx, menu._id);
       const dishes = await Promise.all(links.sort((a, b) => a.sortOrder - b.sortOrder).map(async (link) => {
         const dish = await ctx.db.get("dishes", link.dishId);
         if (!dish || dish.organizationId !== staff.organizationId) return null;

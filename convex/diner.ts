@@ -1,10 +1,12 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import { loadMenuBackground } from "./menu";
+import { usesAssignedTables } from "../lib/restaurant-roles";
 import { formatFolio, loadAccountPaymentTotals } from "./model/billing";
 import { emitNotification } from "./model/notifications";
 import { computeItemProgress, dishOrderRestriction } from "./model/orders";
-import { accountState, buffetAdmission, orderStatus, serviceMode } from "./model/validators";
+import { accountState, buffetAdmission, menuBackgroundView, orderStatus, serviceMode } from "./model/validators";
 
 const CALL_COOLDOWN_MS = 20_000;
 
@@ -71,6 +73,7 @@ async function loadPublicMenu(
   organizationId: Id<"organizations">,
   location: Doc<"locations">,
 ) {
+  if (!usesAssignedTables(location)) return { categories: [], dishes: [] };
   const [categories, dishes, groups, balances] = await Promise.all([
     ctx.db
       .query("dishCategories")
@@ -283,10 +286,17 @@ async function resolveTableWaiter(
   return active && active.endsAt === undefined ? active.assignedStaffId : null;
 }
 
+async function activeTableAccount(ctx: QueryCtx, table: Doc<"diningTables">) {
+  const account = table.currentAccountId ? await ctx.db.get("accounts", table.currentAccountId) : null;
+  return account?.locationId === table.locationId && (account.state === "open" || account.state === "awaiting_payment")
+    ? account : null;
+}
+
 export const tableByQrToken = query({
   args: { qrToken: v.string() },
   returns: v.union(
     v.object({ status: v.literal("invalid") }),
+    v.object({ status: v.literal("buffet"), locationId: v.id("locations") }),
     v.object({
       status: v.literal("paused"),
       restaurantName: v.string(),
@@ -300,6 +310,8 @@ export const tableByQrToken = query({
       locationId: v.id("locations"),
       currencyCode: v.string(),
       serviceMode,
+      timeZone: v.string(),
+      menuBackground: menuBackgroundView,
       table: v.object({
         tableNumber: v.string(),
         sectionName: v.string(),
@@ -340,17 +352,13 @@ export const tableByQrToken = query({
       };
     }
 
-    let activeAccount: Doc<"accounts"> | null = null;
-    if (table.currentAccountId) {
-      const acc = await ctx.db.get("accounts", table.currentAccountId);
-      if (acc && (acc.state === "open" || acc.state === "awaiting_payment")) {
-        activeAccount = acc;
-      }
-    }
+    const activeAccount = await activeTableAccount(ctx, table);
+    if (!usesAssignedTables(location) && !activeAccount) return { status: "buffet" as const, locationId: location._id };
 
-    const [menu, accountSummary] = await Promise.all([
+    const [menu, accountSummary, menuBackground] = await Promise.all([
       loadPublicMenu(ctx, table.organizationId, location),
       activeAccount ? loadDinerAccountSummary(ctx, activeAccount) : Promise.resolve(null),
+      loadMenuBackground(ctx, restaurant),
     ]);
 
     return {
@@ -360,6 +368,8 @@ export const tableByQrToken = query({
       locationId: location._id,
       currencyCode: restaurant.currencyCode,
       serviceMode: location.serviceMode,
+      timeZone: location.timeZone,
+      menuBackground,
       table: {
         tableNumber: table.tableNumber,
         sectionName: section?.name ?? "Salón",
@@ -380,8 +390,11 @@ export const publicMenu = query({
       status: v.literal("ready"),
       restaurantName: v.string(),
       locationName: v.string(),
+      locationId: v.id("locations"),
       currencyCode: v.string(),
       serviceMode,
+      timeZone: v.string(),
+      menuBackground: menuBackgroundView,
       categories: v.array(dinerCategoryValidator),
       dishes: v.array(dinerDishValidator),
     }),
@@ -394,13 +407,18 @@ export const publicMenu = query({
     const restaurant = await ctx.db.get("organizations", location.organizationId);
     if (!restaurant) return { status: "invalid" as const };
 
-    const menu = await loadPublicMenu(ctx, location.organizationId, location);
+    const [menu, menuBackground] = await Promise.all([
+      loadPublicMenu(ctx, location.organizationId, location), loadMenuBackground(ctx, restaurant),
+    ]);
     return {
       status: "ready" as const,
       restaurantName: restaurant.name,
       locationName: location.name,
+      locationId: location._id,
       currencyCode: restaurant.currencyCode,
       serviceMode: location.serviceMode,
+      timeZone: location.timeZone,
+      menuBackground,
       categories: menu.categories,
       dishes: menu.dishes,
     };
@@ -425,6 +443,13 @@ export const callWaiter = mutation({
       throw new ConvexError("Este código QR no está activo en este momento.");
     }
 
+    const [location, account] = await Promise.all([
+      ctx.db.get("locations", table.locationId), activeTableAccount(ctx, table),
+    ]);
+    if (!location || (!usesAssignedTables(location) && !account)) {
+      throw new ConvexError("Esta sucursal usa asientos libres para el buffet.");
+    }
+
     const now = Date.now();
     const recentNotifs = await ctx.db
       .query("notifications")
@@ -437,14 +462,6 @@ export const callWaiter = mutation({
     );
     if (recentlyCalled) {
       return { notified: false, cooldown: true };
-    }
-
-    let account: Doc<"accounts"> | null = null;
-    if (table.currentAccountId) {
-      const acc = await ctx.db.get("accounts", table.currentAccountId);
-      if (acc && (acc.state === "open" || acc.state === "awaiting_payment")) {
-        account = acc;
-      }
     }
 
     const waiterId = await resolveTableWaiter(ctx, table, account);
